@@ -3,6 +3,13 @@
 ///
 /// Program that outputs embedded CEA-708 closed captions in SRT format from
 /// over-the-air ATSC 1.0 TV recordings captured in MPEG-TS format.
+///
+/// References
+/// - http://www.bretl.com/mpeghtml/vidstruc.HTM
+/// - http://dvd.sourceforge.net/dvdinfo/mpeghdrs.html
+/// - http://eilat.sci.brooklyn.cuny.edu/cis52/userfiles/file/MPEG.pdf
+/// - http://www.cs.columbia.edu/~delbert/docs/Dueck%20--%20MPEG-2%20Video%20Transcoding.pdf
+/// - https://comcast.github.io/caption-inspector/html/docs-page.html
 
 #include <cstring>
 #include <iostream>
@@ -34,11 +41,12 @@ static bool demux_mpegts(const std::vector<uint8_t>& data, std::unordered_map<ui
 static bool parse_table(const StreamBuffer& pkt, uint8_t expected_table_id, std::basic_string_view<uint8_t>& table_data);
 static bool parse_pat(const Stream& pat, uint16_t& pmt_pid);
 static bool parse_pmt(const Stream& pmt, std::unordered_map<uint16_t, Stream>& streams);
+static bool depacketize_stream(const std::vector<StreamBuffer>& packets, StreamBuffer& out);
 
 int main(int argc, char** argv)
 {
   // Parse arguments
-  if (argc < 2)
+  if (argc != 2)
     return 1;
   const std::string input_fname = argv[1];
 
@@ -52,12 +60,10 @@ int main(int argc, char** argv)
   if (!demux_mpegts(input_data, streams))
     return 1;
   input_data.clear();
-
-  // Print stream debugging information
   for (const auto& [pid, stream] : streams)
-    std::cout << "found stream pid=" << pid << " packets=" << stream.Packets.size() << std::endl;
+    std::cout << "found stream pid=" << pid << " num_packets=" << stream.Packets.size() << std::endl;
 
-  // Ignore SDT (service description table)
+  // Ignore the SDT (service description table)
   streams.erase(PID_SDT);
 
   // Scan the PAT (program association table) to find the PMT PID
@@ -71,7 +77,7 @@ int main(int argc, char** argv)
   streams.erase(PID_PAT);
   std::cout << "finished scanning PATs, found PMT pid=" << pmt_pid << std::endl;
 
-  // Scan the PMT (program map table)
+  // Scan the PMT (program map table) to tag all the streams
   if (streams.count(pmt_pid) == 0) {
     std::cerr << "transport stream contained no PMT" << std::endl;
     return 1;
@@ -84,12 +90,14 @@ int main(int argc, char** argv)
   for (const auto& [pid, stream] : streams) {
     if (stream.Type == 0) {
       std::cerr << "unidentified stream pid=" << pid << std::endl;
+      return 1;
     } else if (stream.Type == STREAM_TYPE_VIDEO_MPEG2) {
       std::cout << "identified stream pid=" << pid << " type=Video_MPEG2" << std::endl;
     } else if (stream.Type == STREAM_TYPE_AUDIO_AC3) {
       std::cout << "identified stream pid=" << pid << " type=Audio_AC3 lang=(" << stream.Lang << ")" << std::endl;
     } else {
       std::cerr << "unknown stream type pid=" << pid << " type=" << int(stream.Type) << std::endl;
+      return 1;
     }
   }
   for (auto it = streams.begin(); it != streams.end(); ) {
@@ -102,6 +110,13 @@ int main(int argc, char** argv)
     std::cerr << "did not find singular MPEG2 video stream" << std::endl;
     return 1;
   }
+
+  // Extract the elementary stream into a contiguous region of memory
+  StreamBuffer mpeg2_stream;
+  if (!depacketize_stream(streams.cbegin()->second.Packets, mpeg2_stream))
+    return 1;
+  streams.clear();
+  std::cout << "depacketized mpeg2 stream bytes=" << mpeg2_stream.getReadLeft() << std::endl;
 
   //TODO: Scan the MPEG2 video stream for embedded CEA-708 closed captions
 
@@ -443,6 +458,65 @@ static bool parse_pmt(const Stream& pmt, std::unordered_map<uint16_t, Stream>& s
         stream_info.remove_prefix(desc_len);
       }
     }
+  }
+  return true;
+}
+
+static bool depacketize_stream(const std::vector<StreamBuffer>& packets, StreamBuffer& out)
+{
+  for (const auto& pkt : packets) {
+    std::basic_string_view<uint8_t> pkt_iter((const uint8_t*) pkt.getRead(), pkt.getReadLeft());
+    if (pkt_iter.size() < 9) {
+      std::cerr << "invalid pes header" << std::endl;
+      return false;
+    }
+    const uint32_t start_code =
+      (pkt_iter[0] << 16) |
+      (pkt_iter[1] <<  8) |
+      (pkt_iter[2] <<  0);
+    const uint8_t stream_id = pkt_iter[3];
+    const uint16_t pkt_len =
+      (pkt_iter[4] <<  8) |
+      (pkt_iter[5] <<  0);
+    const uint8_t marker              = (pkt_iter[6] >> 6) & 0b11;
+    const uint8_t scrambling_control  = (pkt_iter[6] >> 4) & 0b11;
+    const bool priority               = pkt_iter[6] & 0x08;
+    const bool alignment_ind          = pkt_iter[6] & 0x04;
+    const bool copyright              = pkt_iter[6] & 0x02;
+    const bool original_copy          = pkt_iter[6] & 0x01;
+    const uint8_t pts_dts             = (pkt_iter[7] >> 6) & 0b11;
+    const bool escr_flag              = pkt_iter[7] & 0x20;
+    const bool es_rate                = pkt_iter[7] & 0x10;
+    const bool dsm_trick_mode         = pkt_iter[7] & 0x08;
+    const bool additional_copy        = pkt_iter[7] & 0x04;
+    const bool crc_flag               = pkt_iter[7] & 0x02;
+    const bool ext_flag               = pkt_iter[7] & 0x01;
+    const uint8_t pes_hdr_len         = pkt_iter[8];
+    if (start_code != 0x000001 ||
+        stream_id != 0xE0 ||
+        pkt_len != 0 ||
+        marker != 0b10 ||
+        scrambling_control != 0b00 ||
+        priority ||
+        alignment_ind ||
+        copyright ||
+        original_copy ||
+        (pts_dts != 0b11 && pts_dts != 0b10) ||
+        escr_flag ||
+        es_rate ||
+        dsm_trick_mode ||
+        additional_copy ||
+        crc_flag ||
+        ext_flag ||
+        (pts_dts == 0b11 && pes_hdr_len != 10) ||
+        (pts_dts == 0b10 && pes_hdr_len != 5) ||
+        pkt_iter.size() < 9 + pes_hdr_len) {
+      std::cerr << "invalid pes header" << std::endl;
+      return false;
+    }
+    //TODO: Parse & store PTS/DTS
+    pkt_iter.remove_prefix(9 + pes_hdr_len);
+    out.write(pkt_iter.data(), pkt_iter.size());
   }
   return true;
 }
