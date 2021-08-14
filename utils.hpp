@@ -128,15 +128,12 @@ namespace utils
 
   inline void StreamBuffer::reserveWrite(size_t n)
   {
-    const size_t used = getReadLeft();
-    const size_t left = getWriteLeft();
-
-    if (left >= n)
+    if (n <= getWriteLeft())
       return;
-
+    const size_t used = getReadLeft();
     _size = 2 * (n + used);
     uint8_t* newBuf = (uint8_t*) ::malloc(_size);
-    ::memcpy(newBuf, getRead(), used);
+    ::memcpy(newBuf, _read, used);
     ::free(_buffer);
     _buffer = newBuf;
     _read = _buffer;

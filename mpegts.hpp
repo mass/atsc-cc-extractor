@@ -36,6 +36,9 @@ namespace mpegts
   // Decode the Program Map Table to tag PESs
   bool parse_pmt(const PacketizedStream& pmt, StreamMap_t& streams);
 
+  // Extract a contiguous elementary stream from the container PES
+  bool depacketize_stream(const std::vector<utils::StreamBuffer>& packets, utils::StreamBuffer& out);
+
   /// Implementation ///////////////////////////////////////////////////////////
 
   namespace _detail
@@ -281,6 +284,65 @@ namespace mpegts
           stream_info.remove_prefix(desc_len);
         }
       }
+    }
+    return true;
+  }
+
+  inline bool depacketize_stream(const std::vector<utils::StreamBuffer>& packets, utils::StreamBuffer& out)
+  {
+    for (const auto& pkt : packets) {
+      auto pkt_iter = pkt.getReadView();
+      if (pkt_iter.size() < 9) {
+        std::cerr << "invalid pes header" << std::endl;
+        return false;
+      }
+      const uint32_t start_code =
+        (pkt_iter[0] << 16) |
+        (pkt_iter[1] <<  8) |
+        (pkt_iter[2] <<  0);
+      const uint8_t stream_id = pkt_iter[3];
+      const uint16_t pkt_len =
+        (pkt_iter[4] <<  8) |
+        (pkt_iter[5] <<  0);
+      const uint8_t marker              = (pkt_iter[6] >> 6) & 0b11;
+      const uint8_t scrambling_control  = (pkt_iter[6] >> 4) & 0b11;
+      const bool priority               = pkt_iter[6] & 0x08;
+      const bool alignment_ind          = pkt_iter[6] & 0x04;
+      const bool copyright              = pkt_iter[6] & 0x02;
+      const bool original_copy          = pkt_iter[6] & 0x01;
+      const uint8_t pts_dts             = (pkt_iter[7] >> 6) & 0b11;
+      const bool escr_flag              = pkt_iter[7] & 0x20;
+      const bool es_rate                = pkt_iter[7] & 0x10;
+      const bool dsm_trick_mode         = pkt_iter[7] & 0x08;
+      const bool additional_copy        = pkt_iter[7] & 0x04;
+      const bool crc_flag               = pkt_iter[7] & 0x02;
+      const bool ext_flag               = pkt_iter[7] & 0x01;
+      const uint8_t pes_hdr_len         = pkt_iter[8];
+      if (start_code != 0x000001 ||
+          stream_id != 0xE0 ||
+          pkt_len != 0 ||
+          marker != 0b10 ||
+          scrambling_control != 0b00 ||
+          priority ||
+          alignment_ind ||
+          copyright ||
+          original_copy ||
+          (pts_dts != 0b11 && pts_dts != 0b10) ||
+          escr_flag ||
+          es_rate ||
+          dsm_trick_mode ||
+          additional_copy ||
+          crc_flag ||
+          ext_flag ||
+          (pts_dts == 0b11 && pes_hdr_len != 10) ||
+          (pts_dts == 0b10 && pes_hdr_len != 5) ||
+          pkt_iter.size() < 9 + pes_hdr_len) {
+        std::cerr << "invalid pes header" << std::endl;
+        return false;
+      }
+      //TODO: Parse & store PTS/DTS
+      pkt_iter.remove_prefix(9 + pes_hdr_len);
+      out.write(pkt_iter.data(), pkt_iter.size());
     }
     return true;
   }
