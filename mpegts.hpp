@@ -1,6 +1,6 @@
 #pragma once
 
-#include "utils.hpp"
+#include <m/stream_buf.hpp>
 
 #include <unordered_map>
 
@@ -23,12 +23,12 @@ namespace mpegts
     uint8_t SeqNum = 0xF;
     uint8_t Type = 0;
     std::string Lang;
-    std::vector<utils::StreamBuffer> Packets;
+    std::vector<m::stream_buf<>> Packets;
   };
   using StreamMap_t = std::unordered_map<Pid_t, PacketizedStream>;
 
   // Demultiplex bytes in MPEG-TS container format into a PES map
-  bool demux(utils::byte_view input, StreamMap_t& out);
+  bool demux(m::byte_view input, StreamMap_t& out);
 
   // Decode the Program Association Table to locate the PMT PID
   bool parse_pat(const PacketizedStream& pat, Pid_t& pmt_pid);
@@ -37,7 +37,7 @@ namespace mpegts
   bool parse_pmt(const PacketizedStream& pmt, StreamMap_t& streams);
 
   // Extract a contiguous elementary stream from the container PES
-  bool depacketize_stream(const std::vector<utils::StreamBuffer>& packets, utils::StreamBuffer& out);
+  bool depacketize_stream(const std::vector<m::stream_buf<>>& packets, m::stream_buf<>& out);
 
   /// Implementation ///////////////////////////////////////////////////////////
 
@@ -46,10 +46,10 @@ namespace mpegts
     static constexpr uint8_t _TABLE_ID_PAT = 0;
     static constexpr uint8_t _TABLE_ID_PMT = 2;
 
-    bool _parse_table(utils::byte_view pkt_iter, uint8_t expected_table_id, utils::byte_view& table_data);
+    bool _parse_table(m::byte_view pkt_iter, uint8_t expected_table_id, m::byte_view& table_data);
   };
 
-  inline bool demux(utils::byte_view input, StreamMap_t& out)
+  inline bool demux(m::byte_view input, StreamMap_t& out)
   {
     static constexpr size_t TS_PKT_SIZE = 188;
 
@@ -58,7 +58,7 @@ namespace mpegts
         std::cerr << "invalid input data bytes_left=" << input.size() << std::endl;
         return false;
       }
-      utils::byte_view pkt_iter(input.data(), TS_PKT_SIZE);
+      m::byte_view pkt_iter(input.data(), TS_PKT_SIZE);
       input.remove_prefix(TS_PKT_SIZE);
 
       // Parse & verify header fields
@@ -161,7 +161,7 @@ namespace mpegts
       }
       else {
         if (payload_start)
-          stream.Packets.emplace_back(utils::StreamBuffer());
+          stream.Packets.emplace_back(m::stream_buf());
         else if (stream.Packets.empty()) {
           std::cerr << "payload not started with no previous packet stream=" << pid << std::endl;
           return false;
@@ -177,8 +177,8 @@ namespace mpegts
   inline bool parse_pat(const PacketizedStream& pat, Pid_t& pmt_pid)
   {
     for (const auto& pkt : pat.Packets) {
-      utils::byte_view table_data;
-      if (!_detail::_parse_table(pkt.getReadView(), _detail::_TABLE_ID_PAT, table_data))
+      m::byte_view table_data;
+      if (!_detail::_parse_table(pkt.get_read_view(), _detail::_TABLE_ID_PAT, table_data))
         return false;
 
       const uint16_t program_num  = (table_data[0] << 8) | table_data[1];
@@ -198,8 +198,8 @@ namespace mpegts
   inline bool parse_pmt(const PacketizedStream& pmt, StreamMap_t& streams)
   {
     for (const auto& pkt : pmt.Packets) {
-      utils::byte_view table_data;
-      if (!_detail::_parse_table(pkt.getReadView(), _detail::_TABLE_ID_PMT, table_data))
+      m::byte_view table_data;
+      if (!_detail::_parse_table(pkt.get_read_view(), _detail::_TABLE_ID_PMT, table_data))
         return false;
 
       if (table_data.size() < 4) {
@@ -234,7 +234,7 @@ namespace mpegts
           std::cerr << "invalid PMT table stream fields" << std::endl;
           return false;
         }
-        utils::byte_view stream_info(table_data.data() + 5, stream_info_len);
+        m::byte_view stream_info(table_data.data() + 5, stream_info_len);
         table_data.remove_prefix(5 + stream_info_len);
 
         auto i_stream = streams.find(stream_pid);
@@ -288,10 +288,10 @@ namespace mpegts
     return true;
   }
 
-  inline bool depacketize_stream(const std::vector<utils::StreamBuffer>& packets, utils::StreamBuffer& out)
+  inline bool depacketize_stream(const std::vector<m::stream_buf<>>& packets, m::stream_buf<>& out)
   {
     for (const auto& pkt : packets) {
-      auto pkt_iter = pkt.getReadView();
+      auto pkt_iter = pkt.get_read_view();
       if (pkt_iter.size() < 9) {
         std::cerr << "invalid pes header" << std::endl;
         return false;
@@ -347,7 +347,7 @@ namespace mpegts
     return true;
   }
 
-  inline bool _detail::_parse_table(utils::byte_view pkt_iter, uint8_t expected_table_id, utils::byte_view& table_data)
+  inline bool _detail::_parse_table(m::byte_view pkt_iter, uint8_t expected_table_id, m::byte_view& table_data)
   {
     if (pkt_iter.empty()) {
       std::cerr << "invalid table" << std::endl;
@@ -388,7 +388,7 @@ namespace mpegts
     const bool current_next         = pkt_iter[2] & 0b1;
     const uint8_t section_num       = pkt_iter[3];
     const uint8_t last_section_num  = pkt_iter[4];
-    table_data                      = utils::byte_view(pkt_iter.data() + 5, data_len);
+    table_data                      = m::byte_view(pkt_iter.data() + 5, data_len);
     const uint32_t crc = //TODO: Use this
       (pkt_iter[5 + data_len + 0] << 24) |
       (pkt_iter[5 + data_len + 1] << 16) |

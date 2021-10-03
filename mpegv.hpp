@@ -1,13 +1,13 @@
 #pragma once
 
-#include "utils.hpp"
+#include <m/stream_buf.hpp>
 
 ////////////////////////////////////////////////////////////////////////////////
 /// Utilities for working with data in the MPEG2-Video coding format.
 namespace mpegv
 {
   // Extract DTVCC transport stream (CEA-708 closed captions) from MPEG2 video stream
-  bool extract_dtvcc_packets(const utils::StreamBuffer& mpeg2v_stream, std::vector<utils::StreamBuffer>& out);
+  bool extract_dtvcc_packets(const m::stream_buf<>& mpeg2v_stream, std::vector<m::stream_buf<>>& out);
 
   /// Implementation ///////////////////////////////////////////////////////////
 
@@ -41,21 +41,21 @@ namespace mpegv
     static constexpr uint32_t _START_CODE_SLL = 0x00000101;
     static constexpr uint32_t _START_CODE_SLH = 0x000001AF;
 
-    bool _parse_sequence(utils::byte_view& iter, std::vector<utils::StreamBuffer>& out);
-    bool _parse_gop(utils::byte_view& iter, std::vector<utils::StreamBuffer>& out);
-    bool _parse_picture(utils::byte_view& iter, std::vector<utils::StreamBuffer>& out);
-    bool _parse_slice(utils::byte_view& iter);
-    bool _parse_user(utils::byte_view& iter, std::vector<utils::StreamBuffer>& out);
+    bool _parse_sequence(m::byte_view& iter, std::vector<m::stream_buf<>>& out);
+    bool _parse_gop(m::byte_view& iter, std::vector<m::stream_buf<>>& out);
+    bool _parse_picture(m::byte_view& iter, std::vector<m::stream_buf<>>& out);
+    bool _parse_slice(m::byte_view& iter);
+    bool _parse_user(m::byte_view& iter, std::vector<m::stream_buf<>>& out);
   };
 
-  inline bool extract_dtvcc_packets(const utils::StreamBuffer& mpeg2v_stream, std::vector<utils::StreamBuffer>& out)
+  inline bool extract_dtvcc_packets(const m::stream_buf<>& mpeg2v_stream, std::vector<m::stream_buf<>>& out)
   {
-    auto iter = mpeg2v_stream.getReadView();
+    auto iter = mpeg2v_stream.get_read_view();
     while (iter.size() >= 4)
       if (!_detail::_parse_sequence(iter, out))
         return false;
 
-    if (!out.empty() && out.back().getReadLeft() <= 0)
+    if (!out.empty() && out.back().get_read_left() <= 0)
       out.pop_back();
     if (out.empty()) {
       std::cerr << "no dtvcc packets found" << std::endl;
@@ -65,7 +65,7 @@ namespace mpegv
     return true;
   }
 
-  inline bool _detail::_parse_sequence(utils::byte_view& iter, std::vector<utils::StreamBuffer>& out)
+  inline bool _detail::_parse_sequence(m::byte_view& iter, std::vector<m::stream_buf<>>& out)
   {
     // Sequence header
     {
@@ -173,7 +173,7 @@ namespace mpegv
     return true;
   }
 
-  inline bool _detail::_parse_gop(utils::byte_view& iter, std::vector<utils::StreamBuffer>& out)
+  inline bool _detail::_parse_gop(m::byte_view& iter, std::vector<m::stream_buf<>>& out)
   {
     // Group of pictures header
     {
@@ -225,7 +225,7 @@ namespace mpegv
     return true;
   }
 
-  inline bool _detail::_parse_picture(utils::byte_view& iter, std::vector<utils::StreamBuffer>& out)
+  inline bool _detail::_parse_picture(m::byte_view& iter, std::vector<m::stream_buf<>>& out)
   {
     // Picture header
     {
@@ -307,7 +307,7 @@ namespace mpegv
     return true;
   }
 
-  inline bool _detail::_parse_slice(utils::byte_view& iter)
+  inline bool _detail::_parse_slice(m::byte_view& iter)
   {
     //TODO: Just skipping over macroblock stuff for now
     iter.remove_prefix(4);
@@ -323,7 +323,7 @@ namespace mpegv
     return true;
   }
 
-  inline bool _detail::_parse_user(utils::byte_view& iter, std::vector<utils::StreamBuffer>& out)
+  inline bool _detail::_parse_user(m::byte_view& iter, std::vector<m::stream_buf<>>& out)
   {
     // User header
     {
@@ -416,8 +416,8 @@ namespace mpegv
 
       // Start a new DTVCC packet when instructed to do so
       if (!cc_valid || cc_type == 3)
-        if (out.empty() || out.back().getReadLeft() > 0)
-          out.emplace_back(utils::StreamBuffer());
+        if (out.empty() || out.back().get_read_left() > 0)
+          out.emplace_back(m::stream_buf());
 
       if (cc_valid) {
         if (out.empty()) {

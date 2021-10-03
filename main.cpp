@@ -10,10 +10,13 @@
 /// - http://eilat.sci.brooklyn.cuny.edu/cis52/userfiles/file/MPEG.pdf
 /// - http://www.cs.columbia.edu/~delbert/docs/Dueck%20--%20MPEG-2%20Video%20Transcoding.pdf
 /// - https://comcast.github.io/caption-inspector/html/docs-page.html
+/// - https://en.wikipedia.org/wiki/CEA-708
 
 #include "utils.hpp"
 #include "mpegts.hpp"
 #include "mpegv.hpp"
+
+#include <m/stream_buf.hpp>
 
 int main(int argc, char** argv)
 {
@@ -25,13 +28,13 @@ int main(int argc, char** argv)
   const std::string input_fname = argv[1];
 
   // Read input file data into memory
-  utils::byte_vec input_data;
+  m::byte_vec input_data;
   if (!utils::read_file(input_fname, input_data))
     return 1;
 
   // Scan through input data and parse as transport stream format
   mpegts::StreamMap_t streams;
-  if (!mpegts::demux(utils::byte_vec_to_view(input_data), streams))
+  if (!mpegts::demux(m::view(input_data), streams))
     return 1;
   input_data.clear();
   for (const auto& [pid, stream] : streams)
@@ -90,14 +93,14 @@ int main(int argc, char** argv)
   }
 
   // Extract the elementary stream into a contiguous region of memory
-  utils::StreamBuffer mpeg2v_stream;
+  m::stream_buf mpeg2v_stream;
   if (!mpegts::depacketize_stream(streams.cbegin()->second.Packets, mpeg2v_stream))
     return 1;
   streams.clear();
-  std::cout << "depacketized mpeg2 video stream bytes=" << mpeg2v_stream.getReadLeft() << std::endl;
+  std::cout << "depacketized mpeg2 video stream bytes=" << mpeg2v_stream.get_read_left() << std::endl;
 
   // Extract DTVCC transport stream (CEA-708 closed captions) from MPEG2 video stream
-  std::vector<utils::StreamBuffer> dtvcc_packets;
+  std::vector<m::stream_buf<>> dtvcc_packets;
   if (!mpegv::extract_dtvcc_packets(mpeg2v_stream, dtvcc_packets))
     return 1;
   mpeg2v_stream.clear();
