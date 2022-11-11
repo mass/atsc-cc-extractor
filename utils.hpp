@@ -25,14 +25,14 @@ namespace utils
       return false;
     }
 
-    size_t file_size = 0;
+    ssize_t file_size = 0;
     if (::fseek(fp, 0, SEEK_END) != 0 || (file_size = ::ftell(fp)) < 0 || ::fseek(fp, 0, SEEK_SET) != 0) {
       std::cerr << "error finding file size error=(" << std::strerror(errno) << ")" << std::endl;
       return false;
     }
 
     out.resize(file_size);
-    if (::fread(out.data(), 1, file_size, fp) != file_size) {
+    if (::fread(out.data(), 1, file_size, fp) != size_t(file_size)) {
       std::cerr << "error reading file error=(" << std::strerror(errno) << ")" << std::endl;
       out.clear();
       return false;

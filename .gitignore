@@ -1,3 +1,6 @@
 atsc-cc-extractor
+*.o
+*.d
+
 *.srt
 *.ts

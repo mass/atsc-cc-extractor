@@ -230,7 +230,7 @@ namespace mpegts
         const uint16_t stream_info_len  = ((table_data[3] & 0b11) << 8) | table_data[4];
         if (reserved4 != 0b111 ||
             reserved5 != 0b111100 ||
-            stream_info_len + 5 > table_data.size()) {
+            stream_info_len + 5u > table_data.size()) {
           std::cerr << "invalid PMT table stream fields" << std::endl;
           return false;
         }
@@ -336,12 +336,12 @@ namespace mpegts
           ext_flag ||
           (pts_dts == 0b11 && pes_hdr_len != 10) ||
           (pts_dts == 0b10 && pes_hdr_len != 5) ||
-          pkt_iter.size() < 9 + pes_hdr_len) {
+          pkt_iter.size() < 9u + pes_hdr_len) {
         std::cerr << "invalid pes header" << std::endl;
         return false;
       }
       //TODO: Parse & store PTS/DTS
-      pkt_iter.remove_prefix(9 + pes_hdr_len);
+      pkt_iter.remove_prefix(9u + pes_hdr_len);
       out.write(pkt_iter.data(), pkt_iter.size());
     }
     return true;
@@ -389,7 +389,7 @@ namespace mpegts
     const uint8_t section_num       = pkt_iter[3];
     const uint8_t last_section_num  = pkt_iter[4];
     table_data                      = m::byte_view(pkt_iter.data() + 5, data_len);
-    const uint32_t crc = //TODO: Use this
+    [[maybe_unused]] const uint32_t crc = //TODO: Use this
       (pkt_iter[5 + data_len + 0] << 24) |
       (pkt_iter[5 + data_len + 1] << 16) |
       (pkt_iter[5 + data_len + 2] << 8)  |

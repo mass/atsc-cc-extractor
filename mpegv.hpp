@@ -104,6 +104,13 @@ namespace mpegv
         return false;
       }
 
+      //TODO
+      UNUSED(horz_size);
+      UNUSED(vert_size);
+      UNUSED(frame_rate);
+      UNUSED(bit_rate);
+      UNUSED(vbv_buf_size);
+
       size_t req_bytes = 12;
       const bool intra_quantiser = iter[11] & 0x02;
       if (intra_quantiser)
