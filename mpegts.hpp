@@ -1,7 +1,9 @@
 #pragma once
 
+#include <m/log.hpp>
 #include <m/stream_buf.hpp>
 
+#include <map>
 #include <unordered_map>
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -23,21 +25,41 @@ namespace mpegts
     uint8_t SeqNum = 0xF;
     uint8_t Type = 0;
     std::string Lang;
-    std::vector<m::stream_buf<>> Packets;
+
+    struct Packet
+    {
+      uint64_t PCR;
+      m::stream_buf<> Data;
+    };
+    std::vector<Packet> Packets;
   };
   using StreamMap_t = std::unordered_map<Pid_t, PacketizedStream>;
 
+  // Elementary Stream - entire stream in one contiguous region of memory
+  struct ElementaryStream
+  {
+    m::stream_buf<> Data;
+
+    struct Timecodes
+    {
+      uint64_t PCR = UINT64_MAX;
+      uint64_t PTS = UINT64_MAX;
+      uint64_t DTS = UINT64_MAX;
+    };
+    std::map<off_t, Timecodes> Times;
+  };
+
   // Demultiplex bytes in MPEG-TS container format into a PES map
-  bool demux(m::byte_view input, StreamMap_t& out);
+  bool demux(m::byte_view input, StreamMap_t& out, Pid_t& pcr_pid);
 
   // Decode the Program Association Table to locate the PMT PID
   bool parse_pat(const PacketizedStream& pat, Pid_t& pmt_pid);
 
   // Decode the Program Map Table to tag PESs
-  bool parse_pmt(const PacketizedStream& pmt, StreamMap_t& streams);
+  bool parse_pmt(const PacketizedStream& pmt, StreamMap_t& streams, Pid_t expected_pcr_pid);
 
   // Extract a contiguous elementary stream from the container PES
-  bool depacketize_stream(const std::vector<m::stream_buf<>>& packets, m::stream_buf<>& out);
+  bool depacketize_stream(const PacketizedStream& stream, ElementaryStream& out);
 
   /// Implementation ///////////////////////////////////////////////////////////
 
@@ -49,13 +71,16 @@ namespace mpegts
     bool _parse_table(m::byte_view pkt_iter, uint8_t expected_table_id, m::byte_view& table_data);
   };
 
-  inline bool demux(m::byte_view input, StreamMap_t& out)
+  inline bool demux(m::byte_view input, StreamMap_t& out, Pid_t& pcr_pid)
   {
     static constexpr size_t TS_PKT_SIZE = 188;
 
+    uint64_t PCR = UINT64_MAX;
+    pcr_pid = UINT16_MAX;
+
     while (input.size() > 0) {
       if (input.size() < TS_PKT_SIZE) {
-        std::cerr << "invalid input data bytes_left=" << input.size() << std::endl;
+        LOG(ERROR) << "invalid input data bytes_left=" << input.size();
         return false;
       }
       m::byte_view pkt_iter(input.data(), TS_PKT_SIZE);
@@ -75,7 +100,7 @@ namespace mpegts
           transport_pri ||
           transport_scrambling != 0b00 ||
           adaptation_field == 0b00) {
-        std::cerr << "invalid ts packet" << std::endl;
+        LOG(ERROR) << "invalid ts packet";
         return false;
       }
       pkt_iter.remove_prefix(4);
@@ -92,7 +117,7 @@ namespace mpegts
         if ((adaptation_field == 0b10 && adaptation_len == 0) ||
             (adaptation_field == 0b11 && adaptation_len >= pkt_iter.size()) ||
             (adaptation_len > pkt_iter.size())) {
-          std::cerr << "invalid adaptation field length" << std::endl;
+          LOG(ERROR) << "invalid adaptation field length";
           return false;
         }
         if (adaptation_len > 0) {
@@ -110,20 +135,38 @@ namespace mpegts
               splicing_point ||
               transport_private ||
               adaptation_extension) {
-            std::cerr << "invalid adaptation field flags" << std::endl;
+            LOG(ERROR) << "invalid adaptation field flags";
             return false;
           }
 
           if (pcr_flag) {
             if (adaptation_len != 7) {
-              std::cerr << "invalid adaptation field pcr" << std::endl;
+              LOG(ERROR) << "invalid adaptation field pcr";
               return false;
             }
-            //const uint64_t PCR = 0; //TODO: 33 bits base, 6 rsvd, 9 ext ; PCR = base * 300 + ext
+            if (not payload_start) {
+              LOG(ERROR) << "pcr received in midst of payload unit";
+              return false;
+            }
+            if (pid != pcr_pid && pcr_pid != UINT16_MAX) {
+              LOG(ERROR) << "conflicting pcr pids found";
+              return false;
+            }
+            pcr_pid = pid;
+            const uint64_t PCR_base =
+              (pkt_iter[1] << 25) |
+              (pkt_iter[2] << 17) |
+              (pkt_iter[3] <<  9) |
+              (pkt_iter[4] <<  1) |
+              ((pkt_iter[5] >> 7) & 0b1);
+            const uint64_t PCR_extension =
+              ((uint64_t(pkt_iter[5]) & 0b1) << 8) |
+              pkt_iter[6];
+            PCR = (PCR_base * 300ul) + PCR_extension;
           }
           else if (random_access) {
             if (adaptation_len != 1) {
-              std::cerr << "invalid adaptation field random_access" << std::endl;
+              LOG(ERROR) << "invalid adaptation field random_access";
               return false;
             }
             //TODO: Do anything w/ this field?
@@ -131,7 +174,7 @@ namespace mpegts
           else {
             for (uint8_t i = 1; i < adaptation_len; ++i) {
               if (pkt_iter[i] != 0xFF) {
-                std::cerr << "invalid adaptation field stuffing bytes" << std::endl;
+                LOG(ERROR) << "invalid adaptation field stuffing bytes";
                 return false;
               }
             }
@@ -147,27 +190,26 @@ namespace mpegts
 
       // Verify sequence number continuity per stream
       if (continuity_counter != ((stream.SeqNum + 1) & 0xF)) {
-        std::cerr << "sequence error for stream pid=" << pid
-                  << " expected=" << int((stream.SeqNum + 1) & 0xF)
-                  << " received=" << int(continuity_counter) << std::endl;
+        LOG(ERROR) << "sequence error for stream pid=" << pid
+                   << " expected=" << int((stream.SeqNum + 1) & 0xF)
+                   << " received=" << int(continuity_counter);
         return false;
       }
       stream.SeqNum = continuity_counter;
 
       // Parse packet payload
       if (!(adaptation_field & 0b1)) {
-        std::cerr << "invalid packet, no payload";
+        LOG(ERROR) << "invalid packet, no payload";
         return false;
       }
       else {
         if (payload_start)
-          stream.Packets.emplace_back(m::stream_buf());
+          stream.Packets.emplace_back(PacketizedStream::Packet{PCR, m::stream_buf{}});
         else if (stream.Packets.empty()) {
-          std::cerr << "payload not started with no previous packet stream=" << pid << std::endl;
+          LOG(ERROR) << "payload not started with no previous packet stream=" << pid;
           return false;
         }
-        auto& stream_packet = stream.Packets.back();
-        stream_packet.write(pkt_iter);
+        stream.Packets.back().Data.write(pkt_iter);
       }
     }
 
@@ -176,18 +218,22 @@ namespace mpegts
 
   inline bool parse_pat(const PacketizedStream& pat, Pid_t& pmt_pid)
   {
+    pmt_pid = UINT16_MAX;
     for (const auto& pkt : pat.Packets) {
       m::byte_view table_data;
-      if (!_detail::_parse_table(pkt.get_read_view(), _detail::_TABLE_ID_PAT, table_data))
+      if (!_detail::_parse_table(pkt.Data.get_read_view(), _detail::_TABLE_ID_PAT, table_data) ||
+          table_data.size() != 4) {
+        LOG(ERROR) << "invalid PAT table";
         return false;
+      }
 
       const uint16_t program_num  = (table_data[0] << 8) | table_data[1];
       const uint8_t reserved2     = (table_data[2] >> 5) & 0b111;
       const Pid_t pid             = ((table_data[2] & 0b11111) << 8) | table_data[3];
       if (program_num != 1 ||
           reserved2 != 0b111 ||
-          (pmt_pid != 0 && pmt_pid != pid)) {
-        std::cerr << "invalid PAT table" << std::endl;
+          (pmt_pid != UINT16_MAX && pmt_pid != pid)) {
+        LOG(ERROR) << "invalid PAT table";
         return false;
       }
       pmt_pid = pid;
@@ -195,32 +241,33 @@ namespace mpegts
     return true;
   }
 
-  inline bool parse_pmt(const PacketizedStream& pmt, StreamMap_t& streams)
+  inline bool parse_pmt(const PacketizedStream& pmt, StreamMap_t& streams, Pid_t expected_pcr_pid)
   {
     for (const auto& pkt : pmt.Packets) {
       m::byte_view table_data;
-      if (!_detail::_parse_table(pkt.get_read_view(), _detail::_TABLE_ID_PMT, table_data))
+      if (!_detail::_parse_table(pkt.Data.get_read_view(), _detail::_TABLE_ID_PMT, table_data))
         return false;
 
       if (table_data.size() < 4) {
-        std::cerr << "invalid PMT table" << std::endl;
+        LOG(ERROR) << "invalid PMT table";
         return false;
       }
       const uint8_t reserved2  = (table_data[0] >> 5) & 0b111;
-      //const Pid_t pcr_pid      = ((table_data[0] & 0b11111) << 8) | table_data[1];
+      const Pid_t pcr_pid      = ((table_data[0] & 0b11111) << 8) | table_data[1];
       const uint8_t reserved3  = (table_data[2] >> 2) & 0b111111;
       const uint16_t pid_len   = ((table_data[2] & 0b11) << 8) | table_data[3];
       if (reserved2 != 0b111 ||
           reserved3 != 0b111100 ||
-          pid_len != 0) {
-        std::cerr << "invalid PMT table header" << std::endl;
+          pid_len != 0 ||
+          pcr_pid != expected_pcr_pid) {
+        LOG(ERROR) << "invalid PMT table header";
         return false;
       }
       table_data.remove_prefix(4);
 
       while (!table_data.empty()) {
         if (table_data.size() < 5) {
-          std::cerr << "invalid PMT table stream data" << std::endl;
+          LOG(ERROR) << "invalid PMT table stream data";
           return false;
         }
         const uint8_t stream_type       = table_data[0];
@@ -231,7 +278,7 @@ namespace mpegts
         if (reserved4 != 0b111 ||
             reserved5 != 0b111100 ||
             stream_info_len + 5u > table_data.size()) {
-          std::cerr << "invalid PMT table stream fields" << std::endl;
+          LOG(ERROR) << "invalid PMT table stream fields";
           return false;
         }
         m::byte_view stream_info(table_data.data() + 5, stream_info_len);
@@ -239,12 +286,12 @@ namespace mpegts
 
         auto i_stream = streams.find(stream_pid);
         if (i_stream == streams.end()) {
-          std::cerr << "unknown stream in PMT pid=" << int(stream_pid) << std::endl;
+          LOG(ERROR) << "unknown stream in PMT pid=" << int(stream_pid);
           return false;
         }
         auto& stream = i_stream->second;
         if (stream.Type != 0 && stream.Type != stream_type) {
-          std::cerr << "conflicting stream types from PMT pid=" << int(stream_pid) << std::endl;
+          LOG(ERROR) << "conflicting stream types from PMT pid=" << int(stream_pid);
           return false;
         }
         stream.Type = stream_type;
@@ -254,7 +301,7 @@ namespace mpegts
         // Read stream_info descriptors
         while (!stream_info.empty()) {
           if (stream_info.size() < 2) {
-            std::cerr << "invalid PMT stream info descriptor" << std::endl;
+            LOG(ERROR) << "invalid PMT stream info descriptor";
             return false;
           }
           const uint8_t desc_tag = stream_info[0];
@@ -262,23 +309,23 @@ namespace mpegts
           stream_info.remove_prefix(2);
 
           if (desc_len > stream_info.size()) {
-            std::cerr << "invalid PMT stream info descriptor" << std::endl;
+            LOG(ERROR) << "invalid PMT stream info descriptor";
             return false;
           }
 
           if (desc_tag == DESC_TAG_LANG) {
             if (stream_info[desc_len-1] != 0x00 && stream_info[desc_len-1] != 0x03) {
-              std::cerr << "invalid PMT stream info lang descriptor" << std::endl;
+              LOG(ERROR) << "invalid PMT stream info lang descriptor";
               return false;
             }
             std::string_view lang((const char*) stream_info.data(), desc_len - 1);
             if (!stream.Lang.empty() && stream.Lang != lang) {
-              std::cerr << "conflicting stream info lang descriptor pid=" << int(stream_pid) << std::endl;
+              LOG(ERROR) << "conflicting stream info lang descriptor pid=" << int(stream_pid);
               return false;
             }
             stream.Lang = lang;
           } else {
-            std::cerr << "unhandled stream descriptor tag=" << int(desc_tag) << std::endl;
+            LOG(ERROR) << "unhandled stream descriptor tag=" << int(desc_tag);
             return false;
           }
           stream_info.remove_prefix(desc_len);
@@ -288,12 +335,12 @@ namespace mpegts
     return true;
   }
 
-  inline bool depacketize_stream(const std::vector<m::stream_buf<>>& packets, m::stream_buf<>& out)
+  inline bool depacketize_stream(const PacketizedStream& stream, ElementaryStream& out)
   {
-    for (const auto& pkt : packets) {
-      auto pkt_iter = pkt.get_read_view();
+    for (const auto& pkt : stream.Packets) {
+      auto pkt_iter = pkt.Data.get_read_view();
       if (pkt_iter.size() < 9) {
-        std::cerr << "invalid pes header" << std::endl;
+        LOG(ERROR) << "invalid pes header";
         return false;
       }
       const uint32_t start_code =
@@ -337,12 +384,29 @@ namespace mpegts
           (pts_dts == 0b11 && pes_hdr_len != 10) ||
           (pts_dts == 0b10 && pes_hdr_len != 5) ||
           pkt_iter.size() < 9u + pes_hdr_len) {
-        std::cerr << "invalid pes header" << std::endl;
+        LOG(ERROR) << "invalid pes header";
         return false;
       }
-      //TODO: Parse & store PTS/DTS
-      pkt_iter.remove_prefix(9u + pes_hdr_len);
-      out.write(pkt_iter.data(), pkt_iter.size());
+      pkt_iter.remove_prefix(9u);
+      const uint64_t PTS = 300ul *
+        ((((pkt_iter[0] >> 1) & 0b111) << 30) |
+         (pkt_iter[1] << 22) |
+         ((((pkt_iter[2] >> 1) & 0b1111111) << 15)) |
+         (pkt_iter[3] << 7) |
+         ((((pkt_iter[4] >> 1) & 0b1111111))));
+      pkt_iter.remove_prefix(5);
+      uint64_t DTS = UINT64_MAX;
+      if (pts_dts == 0b11) {
+        DTS = 300ul *
+          ((((pkt_iter[0] >> 1) & 0b111) << 30) |
+           (pkt_iter[1] << 22) |
+           ((((pkt_iter[2] >> 1) & 0b1111111) << 15)) |
+           (pkt_iter[3] << 7) |
+           ((((pkt_iter[4] >> 1) & 0b1111111))));
+        pkt_iter.remove_prefix(5);
+      }
+      out.Times[out.Data.get_read_left()] = { pkt.PCR, PTS, DTS };
+      out.Data.write(pkt_iter.data(), pkt_iter.size());
     }
     return true;
   }
@@ -350,19 +414,19 @@ namespace mpegts
   inline bool _detail::_parse_table(m::byte_view pkt_iter, uint8_t expected_table_id, m::byte_view& table_data)
   {
     if (pkt_iter.empty()) {
-      std::cerr << "invalid table" << std::endl;
+      LOG(ERROR) << "invalid table";
       return false;
     }
 
     const uint8_t pointer_bytes = pkt_iter[0];
     if (pointer_bytes != 0) {
-      std::cerr << "unhandled table pointer bytes num=" << int(pointer_bytes) << std::endl;
+      LOG(ERROR) << "unhandled table pointer bytes num=" << int(pointer_bytes);
       return false;
     }
     pkt_iter.remove_prefix(1);
 
     if (pkt_iter.size() < 3) {
-      std::cerr << "invalid table" << std::endl;
+      LOG(ERROR) << "invalid table";
       return false;
     }
     const uint8_t table_id          = pkt_iter[0];
@@ -376,7 +440,7 @@ namespace mpegts
         section_len > 1021 ||
         section_len < 9 ||
         section_len > pkt_iter.size()) {
-      std::cerr << "invalid table fields" << std::endl;
+      LOG(ERROR) << "invalid table fields";
       return false;
     }
     pkt_iter.remove_prefix(3);
@@ -389,18 +453,18 @@ namespace mpegts
     const uint8_t section_num       = pkt_iter[3];
     const uint8_t last_section_num  = pkt_iter[4];
     table_data                      = m::byte_view(pkt_iter.data() + 5, data_len);
-    [[maybe_unused]] const uint32_t crc = //TODO: Use this
+    /* const uint32_t crc =
       (pkt_iter[5 + data_len + 0] << 24) |
       (pkt_iter[5 + data_len + 1] << 16) |
       (pkt_iter[5 + data_len + 2] << 8)  |
-      (pkt_iter[5 + data_len + 3] << 0);
+      (pkt_iter[5 + data_len + 3] << 0); */
     if (table_id_ext != 1 ||
         reserved1 != 0b11 ||
         version != 0 ||
         ! current_next ||
         section_num != 0 ||
         last_section_num != 0) {
-      std::cerr << "invalid section fields" << std::endl;
+      LOG(ERROR) << "invalid section fields";
       return false;
     }
     pkt_iter.remove_prefix(section_len);
@@ -408,7 +472,7 @@ namespace mpegts
     // All remaining bytes should be stuffed
     while (!pkt_iter.empty()) {
       if (pkt_iter[0] != 0xFF) {
-        std::cerr << "invalid table stuffing" << std::endl;
+        LOG(ERROR) << "invalid table stuffing";
         return false;
       }
       pkt_iter.remove_prefix(1);

@@ -37,8 +37,9 @@ int main(int argc, char** argv)
   LOG(INFO) << "read input file into memory bytes=" << input_data.size();
 
   // Scan through input data and parse as transport stream format
+  mpegts::Pid_t pcr_pid;
   mpegts::StreamMap_t streams;
-  if (!mpegts::demux(m::view(input_data), streams))
+  if (!mpegts::demux(m::view(input_data), streams, pcr_pid))
     return 1;
   input_data.clear();
   input_data.shrink_to_fit();
@@ -49,7 +50,7 @@ int main(int argc, char** argv)
   streams.erase(mpegts::PID_SDT);
 
   // Scan the PAT (program association table) to find the PMT PID
-  uint16_t pmt_pid = 0;
+  mpegts::Pid_t pmt_pid;
   if (streams.count(mpegts::PID_PAT) == 0) {
     LOG(ERROR) << "transport stream contained no PAT";
     return 1;
@@ -64,7 +65,7 @@ int main(int argc, char** argv)
     LOG(ERROR) << "transport stream contained no PMT";
     return 1;
   }
-  if (!mpegts::parse_pmt(streams[pmt_pid], streams))
+  if (!mpegts::parse_pmt(streams[pmt_pid], streams, pcr_pid))
     return 1;
   streams.erase(pmt_pid);
 
@@ -98,17 +99,17 @@ int main(int argc, char** argv)
   }
 
   // Extract the elementary stream into a contiguous region of memory
-  m::stream_buf mpeg2v_stream;
-  if (!mpegts::depacketize_stream(streams.cbegin()->second.Packets, mpeg2v_stream))
+  mpegts::ElementaryStream mpeg2v_stream;
+  if (!mpegts::depacketize_stream(streams.cbegin()->second, mpeg2v_stream))
     return 1;
   streams.clear();
-  LOG(INFO) << "depacketized mpeg2 video stream bytes=" << mpeg2v_stream.get_read_left();
+  LOG(INFO) << "depacketized mpeg2 video stream bytes=" << mpeg2v_stream.Data.get_read_left();
 
   // Extract DTVCC transport stream (CEA-708 closed captions) from MPEG2 video stream
   std::vector<m::stream_buf<>> dtvcc_packets;
   if (!mpegv::extract_dtvcc_packets(mpeg2v_stream, dtvcc_packets))
     return 1;
-  mpeg2v_stream.free();
+  mpeg2v_stream.Data.free();
   LOG(INFO) << "extracted dtvcc transport stream num_packets=" << dtvcc_packets.size();
 
   LOG(INFO) << "finished processing filename=(" << input_fname << ")";
