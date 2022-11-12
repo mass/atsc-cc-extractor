@@ -19,6 +19,14 @@ namespace mpegts
   static constexpr Pid_t PID_SDT   = 0x0011;
   static constexpr Pid_t PID_NULL  = 0x1FFF;
 
+  // Various time references
+  struct Timecodes
+  {
+    uint64_t PCR = UINT64_MAX;
+    uint64_t PTS = UINT64_MAX;
+    uint64_t DTS = UINT64_MAX;
+  };
+
   // Packetized Elementary Stream - carries a single video/audio/data stream
   struct PacketizedStream
   {
@@ -39,13 +47,7 @@ namespace mpegts
   struct ElementaryStream
   {
     m::stream_buf<> Data;
-
-    struct Timecodes
-    {
-      uint64_t PCR = UINT64_MAX;
-      uint64_t PTS = UINT64_MAX;
-      uint64_t DTS = UINT64_MAX;
-    };
+    m::byte_view Iter;
     std::map<off_t, Timecodes> Times;
   };
 
@@ -395,7 +397,7 @@ namespace mpegts
          (pkt_iter[3] << 7) |
          ((((pkt_iter[4] >> 1) & 0b1111111))));
       pkt_iter.remove_prefix(5);
-      uint64_t DTS = UINT64_MAX;
+      uint64_t DTS = PTS;
       if (pts_dts == 0b11) {
         DTS = 300ul *
           ((((pkt_iter[0] >> 1) & 0b111) << 30) |

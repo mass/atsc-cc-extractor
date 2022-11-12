@@ -106,7 +106,7 @@ int main(int argc, char** argv)
   LOG(INFO) << "depacketized mpeg2 video stream bytes=" << mpeg2v_stream.Data.get_read_left();
 
   // Extract DTVCC transport stream (CEA-708 closed captions) from MPEG2 video stream
-  std::vector<m::stream_buf<>> dtvcc_packets;
+  std::vector<mpegv::DtvccPacket> dtvcc_packets;
   if (!mpegv::extract_dtvcc_packets(mpeg2v_stream, dtvcc_packets))
     return 1;
   mpeg2v_stream.Data.free();

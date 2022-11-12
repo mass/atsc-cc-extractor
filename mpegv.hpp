@@ -6,8 +6,17 @@
 /// Utilities for working with data in the MPEG2-Video coding format.
 namespace mpegv
 {
+  // DTVCC Packet - container for closed captioning data
+  struct DtvccPacket
+  {
+    uint8_t Data[39];
+    uint8_t Num = 0u;
+    mpegts::Timecodes Times;
+  };
+  static_assert(sizeof(DtvccPacket) == 64);
+
   // Extract DTVCC transport stream (CEA-708 closed captions) from MPEG2 video stream
-  bool extract_dtvcc_packets(const m::stream_buf<>& mpeg2v_stream, std::vector<m::stream_buf<>>& out);
+  bool extract_dtvcc_packets(mpegts::ElementaryStream& mpeg2v_stream, std::vector<DtvccPacket>& out);
 
   /// Implementation ///////////////////////////////////////////////////////////
 
@@ -41,36 +50,39 @@ namespace mpegv
     static constexpr uint32_t _START_CODE_SLL = 0x00000101;
     static constexpr uint32_t _START_CODE_SLH = 0x000001AF;
 
-    bool _parse_sequence(m::byte_view& iter, std::vector<m::stream_buf<>>& out);
-    bool _parse_gop(m::byte_view& iter, std::vector<m::stream_buf<>>& out);
-    bool _parse_picture(m::byte_view& iter, std::vector<m::stream_buf<>>& out);
-    bool _parse_slice(m::byte_view& iter);
-    bool _parse_user(m::byte_view& iter, std::vector<m::stream_buf<>>& out);
+    bool _parse_sequence(mpegts::ElementaryStream& mpeg2v_stream, std::vector<DtvccPacket>& out);
+    bool _parse_gop(mpegts::ElementaryStream& mpeg2v_stream, std::vector<DtvccPacket>& out);
+    bool _parse_picture(mpegts::ElementaryStream& mpeg2v_stream, std::vector<DtvccPacket>& out, uint16_t& picture_seq);
+    bool _parse_slice(mpegts::ElementaryStream& mpeg2v_stream);
+    bool _parse_user(mpegts::ElementaryStream& mpeg2v_stream, std::vector<DtvccPacket>& out);
   };
 
-  inline bool extract_dtvcc_packets(const m::stream_buf<>& mpeg2v_stream, std::vector<m::stream_buf<>>& out)
+  inline bool extract_dtvcc_packets(mpegts::ElementaryStream& mpeg2v_stream, std::vector<DtvccPacket>& out)
   {
-    auto iter = mpeg2v_stream.get_read_view();
-    while (iter.size() >= 4)
-      if (!_detail::_parse_sequence(iter, out))
+    mpeg2v_stream.Iter = mpeg2v_stream.Data.get_read_view();
+
+    while (mpeg2v_stream.Iter.size() >= 4)
+      if (!_detail::_parse_sequence(mpeg2v_stream, out))
         return false;
 
-    if (!out.empty() && out.back().get_read_left() <= 0)
+    if (!out.empty() && out.back().Num == 0u)
       out.pop_back();
     if (out.empty()) {
-      std::cerr << "no dtvcc packets found" << std::endl;
+      LOG(ERROR) << "no dtvcc packets found";
       return false;
     }
 
     return true;
   }
 
-  inline bool _detail::_parse_sequence(m::byte_view& iter, std::vector<m::stream_buf<>>& out)
+  inline bool _detail::_parse_sequence(mpegts::ElementaryStream& mpeg2v_stream, std::vector<DtvccPacket>& out)
   {
+    auto& iter = mpeg2v_stream.Iter;
+
     // Sequence header
     {
       if (iter.size() < 12) {
-        std::cerr << "invalid sequence header" << std::endl;
+        LOG(ERROR) << "invalid sequence header";
         return false;
       }
       const uint32_t start_code =
@@ -100,7 +112,7 @@ namespace mpegv
           !reserved0 ||
           //vbv_buf_size TODO
           constrained_params) {
-        std::cerr << "invalid sequence header" << std::endl;
+        LOG(ERROR) << "invalid sequence header";
         return false;
       }
 
@@ -116,14 +128,14 @@ namespace mpegv
       if (intra_quantiser)
         req_bytes += 64;
       if (iter.size() < req_bytes) {
-        std::cerr << "invalid sequence header" << std::endl;
+        LOG(ERROR) << "invalid sequence header";
         return false;
       }
       const bool non_intra_quantiser = iter[req_bytes - 1] & 0x01;
       if (non_intra_quantiser)
         req_bytes += 64;
       if (iter.size() < req_bytes) {
-        std::cerr << "invalid sequence header" << std::endl;
+        LOG(ERROR) << "invalid sequence header";
         return false;
       }
       iter.remove_prefix(req_bytes);
@@ -132,7 +144,7 @@ namespace mpegv
     // Sequence extension header
     {
       if (iter.size() < 10) {
-        std::cerr << "invalid sequence extension header" << std::endl;
+        LOG(ERROR) << "invalid sequence extension header";
         return false;
       }
       const uint32_t start_code =
@@ -144,7 +156,7 @@ namespace mpegv
       //TODO: Other fields
       if (start_code != _START_CODE_EXT ||
           variety != 0b0001) {
-        std::cerr << "invalid sequence extension header" << std::endl;
+        LOG(ERROR) << "invalid sequence extension header";
         return false;
       }
       iter.remove_prefix(10);
@@ -159,7 +171,7 @@ namespace mpegv
         (iter[2] << 8)  |
         (iter[3] << 0);
       if (start_code == _START_CODE_GOP) {
-        if (!_parse_gop(iter, out))
+        if (!_parse_gop(mpeg2v_stream, out))
           return false;
         ++count;
       }
@@ -167,25 +179,27 @@ namespace mpegv
         break;
       }
       else {
-        std::cerr << "invalid start code in sequence structure" << std::endl;
+        LOG(ERROR) << "invalid start code in sequence structure";
         return false;
       }
     }
 
     if (count == 0) {
-      std::cerr << "invalid sequence, no gop structures found" << std::endl;
+      LOG(ERROR) << "invalid sequence, no gop structures found";
       return false;
     }
 
     return true;
   }
 
-  inline bool _detail::_parse_gop(m::byte_view& iter, std::vector<m::stream_buf<>>& out)
+  inline bool _detail::_parse_gop(mpegts::ElementaryStream& mpeg2v_stream, std::vector<DtvccPacket>& out)
   {
+    auto& iter = mpeg2v_stream.Iter;
+
     // Group of pictures header
     {
       if (iter.size() < 8) {
-        std::cerr << "invalid gop header" << std::endl;
+        LOG(ERROR) << "invalid gop header";
         return false;
       }
       const uint32_t start_code =
@@ -193,16 +207,34 @@ namespace mpegv
         (iter[1] << 16) |
         (iter[2] << 8)  |
         (iter[3] << 0);
+      /*
+      const uint8_t hour = (iter[4] >> 2) & 0b11111;
+      const uint8_t minu =
+        ((iter[4] & 0b11) << 4) |
+        ((iter[5] >> 4) & 0b1111);
+      const uint8_t secs =
+        ((iter[5] & 0b111) << 3) |
+        ((iter[6] >> 5) & 0b111);
+      const uint8_t frme =
+        ((iter[6] & 0b11111) << 1) |
+        ((iter[7] >> 7) & 0b1);
+       */
+
       //TODO: Other fields
       if (start_code != _START_CODE_GOP) {
-        std::cerr << "invalid gop header" << std::endl;
+        LOG(ERROR) << "invalid gop header";
         return false;
       }
       iter.remove_prefix(8);
+
+      //std::cout << "GOP " << int(hour) << ":" << int(minu) << ":" << int(secs) << "." << int(frme) << std::endl;
     }
 
     // Array of picture structures
-    size_t count = 0;
+    // Note: Pictures are encoded in a different order than they are meant to
+    // be displayed. CC data is meant to be processed in display order, not in
+    // encoded order, so we must reorder pictures before processing CC packets.
+    std::vector<std::vector<DtvccPacket>> pictures;
     while (iter.size() >= 4) {
       const uint32_t start_code =
         (iter[0] << 24) |
@@ -210,34 +242,48 @@ namespace mpegv
         (iter[2] << 8)  |
         (iter[3] << 0);
       if (start_code == _START_CODE_PIC) {
-        if (!_parse_picture(iter, out))
+        uint16_t picture_seq;
+        std::vector<DtvccPacket> pkts;
+        if (!_parse_picture(mpeg2v_stream, pkts, picture_seq))
           return false;
-        ++count;
+        if (!pkts.empty() && pkts.back().Num == 0u)
+          pkts.pop_back();
+
+        if (picture_seq >= pictures.size())
+          pictures.resize(picture_seq + 1);
+        else if (not pictures[picture_seq].empty())
+          return false; // Duplicate
+        pictures[picture_seq] = std::move(pkts);
       }
       else if (start_code == _START_CODE_GOP ||
                start_code == _START_CODE_SEQ) {
         break;
       }
       else {
-        std::cerr << "invalid start code in gop structure" << std::endl;
+        LOG(ERROR) << "invalid start code in gop structure";
         return false;
       }
     }
 
-    if (count == 0) {
-      std::cerr << "invalid gop, no picture structures found" << std::endl;
+    if (pictures.empty()) {
+      LOG(ERROR) << "invalid gop, no picture structures found";
       return false;
     }
+    for (auto&& pkts : pictures)
+      for (auto&& pkt : pkts)
+        out.emplace_back(std::move(pkt));
 
     return true;
   }
 
-  inline bool _detail::_parse_picture(m::byte_view& iter, std::vector<m::stream_buf<>>& out)
+  inline bool _detail::_parse_picture(mpegts::ElementaryStream& mpeg2v_stream, std::vector<DtvccPacket>& out, uint16_t& picture_seq)
   {
+    auto& iter = mpeg2v_stream.Iter;
+
     // Picture header
     {
       if (iter.size() < 8) {
-        std::cerr << "invalid picture header" << std::endl;
+        LOG(ERROR) << "invalid picture header";
         return false;
       }
       const uint32_t start_code =
@@ -245,9 +291,10 @@ namespace mpegv
         (iter[1] << 16) |
         (iter[2] << 8)  |
         (iter[3] << 0);
+      picture_seq = (uint16_t(iter[4]) << 2) | ((iter[5] >> 6) & 0b11);
       //TODO: Other fields
       if (start_code != _START_CODE_PIC) {
-        std::cerr << "invalid picture header" << std::endl;
+        LOG(ERROR) << "invalid picture header";
         return false;
       }
       iter.remove_prefix(8);
@@ -258,7 +305,7 @@ namespace mpegv
     // Picture coding extension header
     {
       if (iter.size() < 11) {
-        std::cerr << "invalid picture coding extension header" << std::endl;
+        LOG(ERROR) << "invalid picture coding extension header";
         return false;
       }
       const uint32_t start_code =
@@ -270,7 +317,7 @@ namespace mpegv
       //TODO: Other fields and checks
       if (start_code != _START_CODE_EXT ||
           variety != 0b1000) {
-        std::cerr << "invalid picture coding extension header" << std::endl;
+        LOG(ERROR) << "invalid picture coding extension header";
         return false;
       }
       const bool composite_display = iter[8] & 0x40;
@@ -286,12 +333,12 @@ namespace mpegv
         (iter[2] << 8)  |
         (iter[3] << 0);
       if (start_code == _START_CODE_USR) {
-        if (!_parse_user(iter, out))
+        if (!_parse_user(mpeg2v_stream, out))
           return false;
         ++count;
       }
       else if (start_code >= _START_CODE_SLL && start_code <= _START_CODE_SLH) {
-        if (!_parse_slice(iter))
+        if (!_parse_slice(mpeg2v_stream))
           return false;
         ++count;
       }
@@ -301,22 +348,23 @@ namespace mpegv
         break;
       }
       else {
-        std::cerr << "invalid start code in picture structure" << std::endl;
+        LOG(ERROR) << "invalid start code in picture structure";
         return false;
       }
     }
 
     if (count == 0) {
-      std::cerr << "invalid picture, no user structures nor slices found" << std::endl;
+      LOG(ERROR) << "invalid picture, no user structures nor slices found";
       return false;
     }
 
     return true;
   }
 
-  inline bool _detail::_parse_slice(m::byte_view& iter)
+  inline bool _detail::_parse_slice(mpegts::ElementaryStream& mpeg2v_stream)
   {
     //TODO: Just skipping over macroblock stuff for now
+    auto& iter = mpeg2v_stream.Iter;
     iter.remove_prefix(4);
     while (iter.size() > 3) {
       const uint32_t start_code =
@@ -330,12 +378,14 @@ namespace mpegv
     return true;
   }
 
-  inline bool _detail::_parse_user(m::byte_view& iter, std::vector<m::stream_buf<>>& out)
+  inline bool _detail::_parse_user(mpegts::ElementaryStream& mpeg2v_stream, std::vector<DtvccPacket>& out)
   {
+    auto& iter = mpeg2v_stream.Iter;
+
     // User header
     {
       if (iter.size() < 9) {
-        std::cerr << "invalid user header" << std::endl;
+        LOG(ERROR) << "invalid user header";
         return false;
       }
       const uint32_t start_code =
@@ -349,7 +399,7 @@ namespace mpegv
         (iter[6] << 8)  |
         (iter[7] << 0);
       if (start_code != _START_CODE_USR) {
-        std::cerr << "invalid user header" << std::endl;
+        LOG(ERROR) << "invalid user header";
         return false;
       }
 
@@ -371,7 +421,7 @@ namespace mpegv
       const uint8_t type_code = iter[8];
       if (atsc_ident != *((uint32_t*)"49AG") || // Backwards to flip endianness
           type_code != 3) {
-        std::cerr << "invalid user atsc a53 header" << std::endl;
+        LOG(ERROR) << "invalid user atsc a53 header";
         return false;
       }
       iter.remove_prefix(9);
@@ -381,7 +431,7 @@ namespace mpegv
     uint8_t cc_count = 0;
     {
       if (iter.size() < 3) {
-        std::cerr << "invalid user_data header" << std::endl;
+        LOG(ERROR) << "invalid user_data header";
         return false;
       }
       const bool process_em_data = iter[0] & 0x80;
@@ -394,7 +444,7 @@ namespace mpegv
           process_addl_data ||
           cc_count == 0 ||
           em_data != 0xFF) {
-        std::cerr << "invalid user_data header" << std::endl;
+        LOG(ERROR) << "invalid user_data header";
         return false;
       }
       iter.remove_prefix(2);
@@ -404,7 +454,7 @@ namespace mpegv
     for (unsigned i = 0; i < cc_count; ++i)
     {
       if (iter.size() < 3) {
-        std::cerr << "invalid cc_data_pkt" << std::endl;
+        LOG(ERROR) << "invalid cc_data_pkt";
         return false;
       }
       const uint8_t marker = (iter[0] >> 3) & 0b11111;
@@ -413,7 +463,7 @@ namespace mpegv
       const uint8_t data1 = iter[1];
       const uint8_t data2 = iter[2];
       if (marker != 0b11111) {
-        std::cerr << "invalid cc_data_pkt" << std::endl;
+        LOG(ERROR) << "invalid cc_data_pkt";
         return false;
       }
       iter.remove_prefix(3);
@@ -422,29 +472,43 @@ namespace mpegv
         continue; // Backwards-compatible CEA-608 / NTSC
 
       // Start a new DTVCC packet when instructed to do so
-      if (!cc_valid || cc_type == 3)
-        if (out.empty() || out.back().get_read_left() > 0)
-          out.emplace_back(m::stream_buf());
+      if (!cc_valid || cc_type == 3) {
+        if (out.empty() || out.back().Num > 0) {
+          out.emplace_back();
+          out.back().Num = 0u;
+
+          const off_t offset = iter.data() -  mpeg2v_stream.Data.get_read();
+          auto it = mpeg2v_stream.Times.lower_bound(offset);
+          //assert(it != mpeg2v_stream.Times.begin());
+          --it;
+          out.back().Times = it->second;
+        }
+      }
 
       if (cc_valid) {
         if (out.empty()) {
-          std::cerr << "invalid cc_data_pkt" << std::endl;
+          LOG(ERROR) << "invalid cc_data_pkt";
           return false;
         }
-        out.back().write(&data1, 1);
-        out.back().write(&data2, 1);
+        auto& pkt = out.back();
+        if (pkt.Num + 2u > sizeof(pkt.Data)) {
+          LOG(ERROR) << "cc_data_pkt too large";
+          return false;
+        }
+        pkt.Data[pkt.Num++] = data1;
+        pkt.Data[pkt.Num++] = data2;
       }
     }
 
     // user_data footer
     {
       if (iter.size() < 1) {
-        std::cerr << "invalid user_data footer" << std::endl;
+        LOG(ERROR) << "invalid user_data footer";
         return false;
       }
       const uint8_t marker_bits = iter[0];
       if (marker_bits != 0xFF) {
-        std::cerr << "invalid user_data footer" << std::endl;
+        LOG(ERROR) << "invalid user_data footer";
         return false;
       }
       iter.remove_prefix(1);
