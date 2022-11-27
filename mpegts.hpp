@@ -299,6 +299,7 @@ namespace mpegts
         stream.Type = stream_type;
 
         static constexpr uint8_t DESC_TAG_LANG = 10;
+        static constexpr uint8_t DESC_TAG_PRIV_FMT = 5;
 
         // Read stream_info descriptors
         while (!stream_info.empty()) {
@@ -326,6 +327,8 @@ namespace mpegts
               return false;
             }
             stream.Lang = lang;
+          } else if (desc_tag == DESC_TAG_PRIV_FMT) {
+            //TODO
           } else {
             LOG(ERROR) << "unhandled stream descriptor tag=" << int(desc_tag);
             return false;

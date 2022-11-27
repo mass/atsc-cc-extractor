@@ -18,6 +18,10 @@ namespace mpegv
   // Extract DTVCC transport stream (CEA-708 closed captions) from MPEG2 video stream
   bool extract_dtvcc_packets(mpegts::ElementaryStream& mpeg2v_stream, std::vector<DtvccPacket>& out);
 
+  // Extract contiguous "services" of DTVCC data from the packetized transport stream
+  bool depacketize_dtvcc_stream(const std::vector<DtvccPacket>& dtvcc_packets,
+                                std::map<uint8_t, mpegts::ElementaryStream>& out);
+
   /// Implementation ///////////////////////////////////////////////////////////
 
   namespace _detail
@@ -514,6 +518,59 @@ namespace mpegv
       iter.remove_prefix(1);
     }
 
+    return true;
+  }
+
+  inline bool depacketize_dtvcc_stream(
+      const std::vector<DtvccPacket>& dtvcc_packets,
+      std::map<uint8_t, mpegts::ElementaryStream>& out)
+  {
+    uint8_t prev_seq = UINT8_MAX;
+    for (const auto& pkt : dtvcc_packets)
+    {
+      for (auto& [_, svc] : out)
+        svc.Times[svc.Data.get_read_left()] = pkt.Times;
+
+      auto pkt_iter = m::byte_view{pkt.Data, pkt.Num};
+      if (pkt_iter.size() < 1) {
+        LOG(ERROR) << "invalid dtvcc packet";
+        return false;
+      }
+
+      const uint8_t seq_num = (pkt_iter[0] >> 6) & 0b11;
+      if (seq_num != ((prev_seq + 1) % 4) && prev_seq != UINT8_MAX) {
+        LOG(ERROR) << "seqnum error received=" << int(seq_num) << " expected=" << int((prev_seq+1)%4);
+        return false;
+      }
+      prev_seq = seq_num;
+
+      const uint8_t pkt_size_code = pkt_iter[0] & 0b111111;
+      const uint8_t pkt_bytes = uint8_t((pkt_size_code == 0 ? 128 : pkt_size_code * 2) - 1);
+      pkt_iter.remove_prefix(1);
+      if (pkt_bytes != pkt_iter.size()) {
+        LOG(ERROR) << "invalid dtvcc packet";
+        return false;
+      }
+
+      while (!pkt_iter.empty()) {
+        const uint8_t svc_num = (pkt_iter[0] >> 5) & 0b111;
+        const uint8_t blk_size = pkt_iter[0] & 0b11111;
+        pkt_iter.remove_prefix(1);
+        if (svc_num == 0 || blk_size == 0) {
+          if (!(svc_num == 0 && blk_size == 0 && pkt_iter.empty())) {
+            LOG(ERROR) << "invalid dtvcc packet";
+            return false;
+          }
+          break;
+        }
+        if (svc_num == 7 || blk_size > pkt_iter.size()) {
+          LOG(ERROR) << "invalid dtvcc packet";
+          return false;
+        }
+        out[svc_num].Data.write(pkt_iter.substr(0, blk_size));
+        pkt_iter.remove_prefix(blk_size);
+      }
+    }
     return true;
   }
 

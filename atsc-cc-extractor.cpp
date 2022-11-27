@@ -112,6 +112,26 @@ int main(int argc, char** argv)
   mpeg2v_stream.Data.free();
   LOG(INFO) << "extracted dtvcc transport stream num_packets=" << dtvcc_packets.size();
 
+  // Extract each DTVCC "service" as a contiguous stream
+  std::map<uint8_t, mpegts::ElementaryStream> dtvcc_services;
+  if (!mpegv::depacketize_dtvcc_stream(dtvcc_packets, dtvcc_services))
+    return 1;
+  dtvcc_packets.clear();
+  LOG(INFO) << "depacketized dtvcc services count=" << dtvcc_services.size();
+  for (const auto& [svc_id, svc] : dtvcc_services)
+    LOG(INFO) << "    "
+              << " service_id=" << int(svc_id)
+              << " bytes=" << svc.Data.get_read_left()
+              << " packets=" << svc.Times.size();
+  //TODO: More intelligent selection?
+  auto svc = std::max_element(dtvcc_services.begin(), dtvcc_services.end(),
+      [] (const auto& a, const auto& b) { return a.second.Data.get_read_left() < b.second.Data.get_read_left(); });
+  mpegts::ElementaryStream dtvcc_stream = std::move(svc->second);
+  LOG(INFO) << "selected dtvcc service id=" << int(svc->first);
+  dtvcc_services.clear();
+
+  //TODO: Further steps
+
   LOG(INFO) << "finished processing filename=(" << input_fname << ")";
   return 0;
 }
