@@ -130,6 +130,10 @@ int main(int argc, char** argv)
   LOG(INFO) << "selected dtvcc service id=" << int(svc->first);
   dtvcc_services.clear();
 
+  // TODO
+  if (!mpegv::process_dtvcc_stream(dtvcc_stream))
+    return 1;
+
   //TODO: Further steps
 
   LOG(INFO) << "finished processing filename=(" << input_fname << ")";

@@ -22,6 +22,9 @@ namespace mpegv
   bool depacketize_dtvcc_stream(const std::vector<DtvccPacket>& dtvcc_packets,
                                 std::map<uint8_t, mpegts::ElementaryStream>& out);
 
+  // TODO
+  bool process_dtvcc_stream(const mpegts::ElementaryStream& dtvcc_stream); //TODO: out?
+
   /// Implementation ///////////////////////////////////////////////////////////
 
   namespace _detail
@@ -571,6 +574,182 @@ namespace mpegv
         pkt_iter.remove_prefix(blk_size);
       }
     }
+    return true;
+  }
+
+  inline bool process_dtvcc_stream(const mpegts::ElementaryStream& dtvcc_stream)
+  {
+    std::vector<char> buf;
+
+    const auto flush_buf = [&buf] () {
+      buf.push_back('\0');
+      if (buf.size() > 1)
+        LOG(INFO) << "buf=(" << buf.data() << ")";
+      buf.clear();
+    };
+
+    auto iter = dtvcc_stream.Data.get_read_view();
+    while (!iter.empty())
+    {
+      const uint8_t cmd = iter[0];
+
+      // Check for EXT1 flag, command is in next byte
+      if (cmd == 0x10) {
+        if (iter.size() == 1) {
+          LOG(ERROR) << "invalid dtvcc stream";
+          return false;
+        }
+        const uint8_t ecmd = iter[1];
+
+        // Extended miscellaneous control codes (C2)
+        if (ecmd <= 0x1F) {
+          // No commands defined (yet)
+          if (ecmd <= 0x07)
+            iter.remove_prefix(2);
+          else if (ecmd <= 0x0F)
+            iter.remove_prefix(3);
+          else if (ecmd <= 0x17)
+            iter.remove_prefix(4);
+          else
+            iter.remove_prefix(5);
+        }
+        // Extended control code set 2 (C3)
+        else if (ecmd >= 0x80 && ecmd <= 0x9F) {
+          // No commands defined (yet)
+          if (ecmd <= 0x87)
+            iter.remove_prefix(6);
+          else if (ecmd <= 0x8F)
+            iter.remove_prefix(7);
+          else
+            iter.remove_prefix(2);
+        }
+        // Extended control code set 1 (G2)
+        else if (ecmd >= 0x20 && ecmd <= 0x7F) {
+          //TODO: Printable characters to handle here
+          iter.remove_prefix(2);
+          return false;
+        }
+        // Future characters and icons (G3)
+        else if (ecmd >= 0xA0) {
+          //TODO: Handle [CC] icon
+          iter.remove_prefix(2);
+          return false;
+        }
+        continue;
+      }
+
+      // Subset of ASCII control codes (C0)
+      if (cmd <= 0x1F) {
+        flush_buf();
+        if (cmd <= 0x0F) {
+          //TODO: Handle codes here
+          iter.remove_prefix(1);
+          return false;
+          /*
+          switch (cmd) {
+            case 0x00: std::cout << "    <C0_CMD_NUL>" << std::endl; break;
+            case 0x03: std::cout << "    <C0_CMD_ETX>" << std::endl; break;
+            case 0x08: std::cout << "    <C0_CMD_BS>" << std::endl; break;
+            case 0x0c: std::cout << "    <C0_CMD_FF>" << std::endl; break;
+            case 0x0d: std::cout << "    <C0_CMD_CR>" << std::endl; break;
+            case 0x0e: std::cout << "    <C0_CMD_HCR>" << std::endl; break;
+            default: //TODO return false;
+          } */
+        }
+        else if (cmd <= 0x17)
+          iter.remove_prefix(2);
+        else if (cmd <= 0x1F)
+          iter.remove_prefix(3);
+        continue;
+      }
+      // Caption control codes (C1)
+      else if (cmd >= 0x80 && cmd <= 0x9F) {
+        flush_buf();
+        if (cmd <= 0x87) {
+          //TODO: Handle SetCurrentWindow0-7
+          std::cout << "<C1_CMD_CWn>" << std::endl;
+          iter.remove_prefix(1);
+        }
+        else if (cmd >= 0x98 && cmd <= 0x9F) {
+          //TODO: Handle DefineWindow0-7
+          std::cout << "<C1_CMD_DFn>" << std::endl;
+          iter.remove_prefix(7);
+        }
+        else {
+          //TODO: Handle all these
+          switch (cmd) {
+            case 0x88:
+              std::cout << "<C1_CMD_CLW>" << std::endl;
+              iter.remove_prefix(2);
+              break;
+            case 0x89:
+              std::cout << "<C1_CMD_DSW>" << std::endl;
+              iter.remove_prefix(2);
+              break;
+            case 0x8A:
+              std::cout << "<C1_CMD_HDW>" << std::endl;
+              iter.remove_prefix(2);
+              break;
+            case 0x8B:
+              std::cout << "<C1_CMD_TGW>" << std::endl;
+              iter.remove_prefix(2);
+              break;
+            case 0x8C:
+              std::cout << "<C1_CMD_DLW>" << std::endl;
+              iter.remove_prefix(2);
+              break;
+            case 0x8D:
+              std::cout << "<C1_CMD_DLY>" << std::endl;
+              iter.remove_prefix(2);
+              break;
+            case 0x8E:
+              std::cout << "<C1_CMD_DLC>" << std::endl;
+              iter.remove_prefix(1);
+              break;
+            case 0x8F:
+              std::cout << "<C1_CMD_RST>" << std::endl;
+              iter.remove_prefix(1);
+              break;
+            case 0x90:
+              std::cout << "<C1_CMD_SPA>" << std::endl;
+              iter.remove_prefix(3);
+              break;
+            case 0x91:
+              std::cout << "<C1_CMD_SPC>" << std::endl;
+              iter.remove_prefix(4);
+              break;
+            case 0x92:
+              std::cout << "<C1_CMD_SPL>" << std::endl;
+              iter.remove_prefix(3);
+              break;
+            case 0x97:
+              std::cout << "<C1_CMD_SWA>" << std::endl;
+              iter.remove_prefix(5);
+              break;
+            default:
+              //TODO
+              return false;
+          }
+        }
+        continue;
+      }
+      // Modified ASCII printable characters (G0)
+      else if (cmd >= 0x20 && cmd <= 0x7F) {
+        buf.push_back(cmd);
+        iter.remove_prefix(1);
+        continue;
+      }
+      // Latin-1 characters (G1)
+      else if (cmd >= 0xA0) {
+        //TODO: Printable characters to handle here
+        iter.remove_prefix(1);
+        return false;
+      }
+
+      LOG(ERROR) << "invalid CEA-708 command code=" << int(cmd);
+      return false;
+    }
+
     return true;
   }
 
