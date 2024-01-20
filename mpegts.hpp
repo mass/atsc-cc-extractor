@@ -22,73 +22,73 @@ namespace mpegts
   // Various time references
   struct Timecodes
   {
-    uint64_t PCR = UINT64_MAX;
-    uint64_t PTS = UINT64_MAX;
-    uint64_t DTS = UINT64_MAX;
+    uint64_t PCR = UINT64_MAX; // Main Program Clock Reference (see demux())
+    uint64_t PTS = UINT64_MAX; // When should the data by presented (ref PCR)
+    uint64_t DTS = UINT64_MAX; // When should the data be decoded (ref PCR)
   };
 
-  // Packetized Elementary Stream - carries a single video/audio/data stream
-  struct PacketizedStream
+  // Carries a single video/audio/data stream in variable-length packets
+  struct PacketizedElementaryStream
   {
-    uint8_t SeqNum = 0xF;
-    uint8_t Type = 0;
-    std::string Lang;
-
     struct Packet
     {
       uint64_t PCR;
       m::stream_buf<> Data;
     };
     std::vector<Packet> Packets;
+
+    uint8_t SeqNum = 0xF;
+    uint8_t Type = 0;
+    std::string Lang;
   };
-  using StreamMap_t = std::unordered_map<Pid_t, PacketizedStream>;
+  using StreamMap_t = std::unordered_map<Pid_t, PacketizedElementaryStream>;
 
   // Elementary Stream - entire stream in one contiguous region of memory
   struct ElementaryStream
   {
     m::stream_buf<> Data;
-    m::byte_view Iter;
     std::map<off_t, Timecodes> Times;
+
+    m::byte_view Iter;
   };
 
   // Demultiplex bytes in MPEG-TS container format into a PES map
-  bool demux(m::byte_view input, StreamMap_t& out, Pid_t& pcr_pid);
+  static inline bool demux(m::byte_view input, StreamMap_t& out, Pid_t& pcr_pid);
 
   // Decode the Program Association Table to locate the PMT PID
-  bool parse_pat(const PacketizedStream& pat, Pid_t& pmt_pid);
+  static inline bool parse_pat(const PacketizedElementaryStream& pat, Pid_t& pmt_pid);
 
   // Decode the Program Map Table to tag PESs
-  bool parse_pmt(const PacketizedStream& pmt, StreamMap_t& streams, Pid_t expected_pcr_pid);
+  static inline bool parse_pmt(const PacketizedElementaryStream& pmt, StreamMap_t& streams, Pid_t expected_pcr_pid);
 
   // Extract a contiguous elementary stream from the container PES
-  bool depacketize_stream(const PacketizedStream& stream, ElementaryStream& out);
+  static inline bool depacketize_stream(const PacketizedElementaryStream& pes, ElementaryStream& out);
 
   /// Implementation ///////////////////////////////////////////////////////////
 
-  namespace _detail
+  static inline bool demux(m::byte_view input, StreamMap_t& out, Pid_t& pcr_pid)
   {
-    static constexpr uint8_t _TABLE_ID_PAT = 0;
-    static constexpr uint8_t _TABLE_ID_PMT = 2;
-
-    bool _parse_table(m::byte_view pkt_iter, uint8_t expected_table_id, m::byte_view& table_data);
-  };
-
-  inline bool demux(m::byte_view input, StreamMap_t& out, Pid_t& pcr_pid)
-  {
+    // An MPEG TS is nothing but a sequence of fixed-size packets
     static constexpr size_t TS_PKT_SIZE = 188;
 
+    // PCR timestamps are injected into the transport stream periodically,
+    // always as part of a single PID. This is the main 27MHz clock that is
+    // used to synchonize all the various elementary streams together. A
+    // timestamp for each byte can be calculated by linearly interpolating
+    // between successive PCR timestamps.
     uint64_t PCR = UINT64_MAX;
     pcr_pid = UINT16_MAX;
 
-    while (input.size() > 0) {
+    for (size_t pkt_idx = 0; input.size() > 0; ++pkt_idx)
+    {
       if (input.size() < TS_PKT_SIZE) {
         LOG(ERROR) << "invalid input data bytes_left=" << input.size();
         return false;
       }
-      m::byte_view pkt_iter(input.data(), TS_PKT_SIZE);
+      auto pkt_iter = input.substr(0, TS_PKT_SIZE);
       input.remove_prefix(TS_PKT_SIZE);
 
-      // Parse & verify header fields
+      // Parse & verify header fields (ISO 13818-1 Table 2-2)
       const uint8_t sync_byte             = pkt_iter[0];
       const bool transport_error          = pkt_iter[1] & 0x80;
       const bool payload_start            = pkt_iter[1] & 0x40;
@@ -97,40 +97,36 @@ namespace mpegts
       const uint8_t transport_scrambling  = (pkt_iter[3] >> 6) & 0b11;
       const uint8_t adaptation_field      = (pkt_iter[3] >> 4) & 0b11;
       const uint8_t continuity_counter    = pkt_iter[3] & 0b1111;
-      if (sync_byte != 'G' ||
+      if (sync_byte != 0x47 ||
           transport_error ||
           transport_pri ||
           transport_scrambling != 0b00 ||
-          adaptation_field == 0b00) {
-        LOG(ERROR) << "invalid ts packet";
+          (adaptation_field == 0b00 || adaptation_field == 0b10)) {
+        LOG(ERROR) << "invalid mpegts header";
         return false;
       }
       pkt_iter.remove_prefix(4);
 
-      auto i_stream = out.find(pid);
-      if (i_stream == out.end())
-        i_stream = out.insert({pid, PacketizedStream()}).first;
-      auto& stream = i_stream->second;
-
-      // Parse adaptation field if it exists
-      if (adaptation_field == 0b10 || adaptation_field == 0b11) {
+      // Parse adaptation field if it exists (ISO 13818-1 Table 2-6)
+      if (adaptation_field == 0b11) {
         const uint8_t adaptation_len = pkt_iter[0];
         pkt_iter.remove_prefix(1);
-        if ((adaptation_field == 0b10 && adaptation_len == 0) ||
-            (adaptation_field == 0b11 && adaptation_len >= pkt_iter.size()) ||
-            (adaptation_len > pkt_iter.size())) {
+        if (adaptation_len >= pkt_iter.size()) {
           LOG(ERROR) << "invalid adaptation field length";
           return false;
         }
         if (adaptation_len > 0) {
-          const bool discontinuity         = pkt_iter[0] & 0x80;
-          const bool random_access         = pkt_iter[0] & 0x40;
-          const bool stream_pri            = pkt_iter[0] & 0x20;
-          const bool pcr_flag              = pkt_iter[0] & 0x10;
-          const bool opcr_flag             = pkt_iter[0] & 0x08;
-          const bool splicing_point        = pkt_iter[0] & 0x04;
-          const bool transport_private     = pkt_iter[0] & 0x02;
-          const bool adaptation_extension  = pkt_iter[0] & 0x01;
+          auto adapt_iter = pkt_iter.substr(0, adaptation_len);
+          pkt_iter.remove_prefix(adaptation_len);
+
+          const bool discontinuity         = adapt_iter[0] & 0x80;
+          const bool random_access         = adapt_iter[0] & 0x40;
+          const bool stream_pri            = adapt_iter[0] & 0x20;
+          const bool pcr_flag              = adapt_iter[0] & 0x10;
+          const bool opcr_flag             = adapt_iter[0] & 0x08;
+          const bool splicing_point        = adapt_iter[0] & 0x04;
+          const bool transport_private     = adapt_iter[0] & 0x02;
+          const bool adaptation_extension  = adapt_iter[0] & 0x01;
           if (discontinuity ||
               stream_pri ||
               opcr_flag ||
@@ -140,9 +136,12 @@ namespace mpegts
             LOG(ERROR) << "invalid adaptation field flags";
             return false;
           }
+          adapt_iter.remove_prefix(1);
+
+          UNUSED(random_access); // NB: Not doing anything with this field
 
           if (pcr_flag) {
-            if (adaptation_len != 7) {
+            if (adapt_iter.size() < 6) {
               LOG(ERROR) << "invalid adaptation field pcr";
               return false;
             }
@@ -155,34 +154,25 @@ namespace mpegts
               return false;
             }
             pcr_pid = pid;
-            const uint64_t PCR_base =
-              (pkt_iter[1] << 25) |
-              (pkt_iter[2] << 17) |
-              (pkt_iter[3] <<  9) |
-              (pkt_iter[4] <<  1) |
-              ((pkt_iter[5] >> 7) & 0b1);
-            const uint64_t PCR_extension =
-              ((uint64_t(pkt_iter[5]) & 0b1) << 8) |
-              pkt_iter[6];
+            const uint64_t PCR_base = // 33-bits
+              (adapt_iter[0] << 25) |
+              (adapt_iter[1] << 17) |
+              (adapt_iter[2] <<  9) |
+              (adapt_iter[3] <<  1) |
+              ((adapt_iter[4] >> 7) & 0b1);
+            const uint64_t PCR_extension = // 9-bits
+              ((adapt_iter[4] & 0b1) << 8) |
+              adapt_iter[5];
             PCR = (PCR_base * 300ul) + PCR_extension;
-          }
-          else if (random_access) {
-            if (adaptation_len != 1) {
-              LOG(ERROR) << "invalid adaptation field random_access";
-              return false;
-            }
-            //TODO: Do anything w/ this field?
-          }
-          else {
-            for (uint8_t i = 1; i < adaptation_len; ++i) {
-              if (pkt_iter[i] != 0xFF) {
-                LOG(ERROR) << "invalid adaptation field stuffing bytes";
-                return false;
-              }
-            }
+            adapt_iter.remove_prefix(6);
           }
 
-          pkt_iter.remove_prefix(adaptation_len);
+          for (auto stuffing_byte : adapt_iter) {
+            if (stuffing_byte != 0xFF) {
+              LOG(ERROR) << "invalid adaptation field stuffing bytes";
+              return false;
+            }
+          }
         }
       }
 
@@ -190,102 +180,216 @@ namespace mpegts
       if (pid == PID_NULL)
         continue;
 
+      auto i_pes = out.find(pid);
+      if (i_pes == out.end())
+        i_pes = out.try_emplace(pid, PacketizedElementaryStream()).first;
+      auto& pes = i_pes->second;
+
       // Verify sequence number continuity per stream
-      if (continuity_counter != ((stream.SeqNum + 1) & 0xF)) {
+      if (continuity_counter != ((pes.SeqNum + 1) & 0xF)) {
         LOG(ERROR) << "sequence error for stream pid=" << pid
-                   << " expected=" << int((stream.SeqNum + 1) & 0xF)
+                   << " expected=" << int((pes.SeqNum + 1) & 0xF)
                    << " received=" << int(continuity_counter);
         return false;
       }
-      stream.SeqNum = continuity_counter;
+      pes.SeqNum = continuity_counter;
 
-      // Parse packet payload
-      if (!(adaptation_field & 0b1)) {
-        LOG(ERROR) << "invalid packet, no payload";
+      // Ignore all packets before the first PCR we encounter
+      if (PCR == UINT64_MAX)
+        continue;
+
+      // Save packet payload
+      if (payload_start)
+        pes.Packets.emplace_back(PacketizedElementaryStream::Packet{PCR, m::stream_buf{}});
+      else if (pes.Packets.empty()) {
+        LOG(ERROR) << "payload not started with no previous packet stream=" << pid;
         return false;
       }
-      else {
-        if (payload_start)
-          stream.Packets.emplace_back(PacketizedStream::Packet{PCR, m::stream_buf{}});
-        else if (stream.Packets.empty()) {
-          LOG(ERROR) << "payload not started with no previous packet stream=" << pid;
-          return false;
-        }
-        stream.Packets.back().Data.write(pkt_iter);
-      }
+      pes.Packets.back().Data.write(pkt_iter);
     }
 
     return true;
   }
 
-  inline bool parse_pat(const PacketizedStream& pat, Pid_t& pmt_pid)
+  static inline bool parse_pat(const PacketizedElementaryStream& pat, Pid_t& pmt_pid)
   {
     pmt_pid = UINT16_MAX;
-    for (const auto& pkt : pat.Packets) {
-      m::byte_view table_data;
-      if (!_detail::_parse_table(pkt.Data.get_read_view(), _detail::_TABLE_ID_PAT, table_data) ||
-          table_data.size() != 4) {
-        LOG(ERROR) << "invalid PAT table";
+    for (const auto& pkt : pat.Packets)
+    {
+      auto pkt_iter = pkt.Data.get_read_view();
+
+      // Parse the pointer prefix
+      if (pkt_iter.size() < 1) {
+        LOG(ERROR) << "invalid PAT size";
         return false;
       }
+      const uint8_t pointer_bytes = pkt_iter[0];
+      if (pointer_bytes != 0) {
+        LOG(ERROR) << "invalid PAT pointer";
+        return false;
+      }
+      pkt_iter.remove_prefix(1);
 
-      const uint16_t program_num  = (table_data[0] << 8) | table_data[1];
-      const uint8_t reserved2     = (table_data[2] >> 5) & 0b111;
-      const Pid_t pid             = ((table_data[2] & 0b11111) << 8) | table_data[3];
-      if (program_num != 1 ||
+      // Parse the PAT header (ISO 13818-1 Table 2-30)
+      // NB: section_len includes the 5 header bytes following it, 4 CRC32
+      //   bytes, and the 4 bytes that make up the program number and PMT PID.
+      if (pkt_iter.size() < 8) {
+        LOG(ERROR) << "invalid PAT size";
+        return false;
+      }
+      const uint8_t table_id              = pkt_iter[0];
+      const bool section_syntax_flag      = pkt_iter[1] & 0x80;
+      const bool zero                     = pkt_iter[1] & 0x40;
+      const uint8_t reserved0             = (pkt_iter[1] >> 4) & 0b11;
+      const uint8_t section_len_zero      = (pkt_iter[1] >> 2) & 0b11;
+      const uint16_t section_len          = ((pkt_iter[1] & 0b11) << 8) | pkt_iter[2];
+      const uint16_t transport_stream_id  = (pkt_iter[3] << 8) | pkt_iter[4];
+      const uint8_t reserved1             = (pkt_iter[5] >> 6) & 0b11;
+      const uint8_t version_number        = (pkt_iter[5] >> 1) & 0b11111;
+      const uint8_t current_next_indc     = pkt_iter[5] & 0b1;
+      const uint8_t section_number        = pkt_iter[6];
+      const uint8_t last_section_number   = pkt_iter[7];
+      if (table_id != 0u ||
+          !section_syntax_flag ||
+          zero ||
+          reserved0 != 0b11 ||
+          section_len_zero ||
+          section_len != 4u + 5u + 4u ||
+          transport_stream_id != 1u ||
+          reserved1 != 0b11 ||
+          version_number ||
+          !current_next_indc ||
+          section_number ||
+          last_section_number) {
+        LOG(ERROR) << "invalid PAT header";
+        return false;
+      }
+      pkt_iter.remove_prefix(8);
+
+      // Parse the PAT section data
+      if (pkt_iter.size() < 8) {
+        LOG(ERROR) << "invalid PAT size";
+        return false;
+      }
+      const uint16_t program_num  = (pkt_iter[0] << 8) | pkt_iter[1];
+      const uint8_t reserved2     = (pkt_iter[2] >> 5) & 0b111;
+      const Pid_t pid             = ((pkt_iter[2] & 0b11111) << 8) | pkt_iter[3];
+      if (program_num != 1u ||
           reserved2 != 0b111 ||
           (pmt_pid != UINT16_MAX && pmt_pid != pid)) {
         LOG(ERROR) << "invalid PAT table";
         return false;
       }
-      pmt_pid = pid;
+      pkt_iter.remove_prefix(8); // CRC32 not verified
+      pmt_pid = pid; // Extract the PID of the PMT
+
+      // Verify the remainder of the packet is properly stuffed
+      for (auto stuffing_byte : pkt_iter) {
+        if (stuffing_byte != 0xFF) {
+          LOG(ERROR) << "invalid PAT stuffing bytes";
+          return false;
+        }
+      }
     }
     return true;
   }
 
-  inline bool parse_pmt(const PacketizedStream& pmt, StreamMap_t& streams, Pid_t expected_pcr_pid)
+  static inline bool parse_pmt(const PacketizedElementaryStream& pmt, StreamMap_t& streams, Pid_t expected_pcr_pid)
   {
-    for (const auto& pkt : pmt.Packets) {
-      m::byte_view table_data;
-      if (!_detail::_parse_table(pkt.Data.get_read_view(), _detail::_TABLE_ID_PMT, table_data))
-        return false;
+    for (const auto& pkt : pmt.Packets)
+    {
+      auto pkt_iter = pkt.Data.get_read_view();
 
-      if (table_data.size() < 4) {
-        LOG(ERROR) << "invalid PMT table";
+      // Parse the pointer prefix
+      if (pkt_iter.size() < 1) {
+        LOG(ERROR) << "invalid PMT size";
         return false;
       }
-      const uint8_t reserved2  = (table_data[0] >> 5) & 0b111;
-      const Pid_t pcr_pid      = ((table_data[0] & 0b11111) << 8) | table_data[1];
-      const uint8_t reserved3  = (table_data[2] >> 2) & 0b111111;
-      const uint16_t pid_len   = ((table_data[2] & 0b11) << 8) | table_data[3];
-      if (reserved2 != 0b111 ||
-          reserved3 != 0b111100 ||
-          pid_len != 0 ||
-          pcr_pid != expected_pcr_pid) {
-        LOG(ERROR) << "invalid PMT table header";
+      const uint8_t pointer_bytes = pkt_iter[0];
+      if (pointer_bytes != 0) {
+        LOG(ERROR) << "invalid PMT pointer";
         return false;
       }
-      table_data.remove_prefix(4);
+      pkt_iter.remove_prefix(1);
 
-      while (!table_data.empty()) {
+      // Parse the PMT header (ISO 13818-1 Table 2-33)
+      // NB: section_len includes the 9 header bytes following it, 4 CRC32
+      //   bytes, and then all the bytes for the stream info data.
+      if (pkt_iter.size() < 12) {
+        LOG(ERROR) << "invalid PMT size";
+        return false;
+      }
+      const uint8_t table_id              = pkt_iter[0];
+      const bool section_syntax_flag      = pkt_iter[1] & 0x80;
+      const bool zero                     = pkt_iter[1] & 0x40;
+      const uint8_t reserved0             = (pkt_iter[1] >> 4) & 0b11;
+      const uint8_t section_len_zero      = (pkt_iter[1] >> 2) & 0b11;
+      const uint16_t section_len          = ((pkt_iter[1] & 0b11) << 8) | pkt_iter[2];
+      const uint16_t program_number       = (pkt_iter[3] << 8) | pkt_iter[4];
+      const uint8_t reserved1             = (pkt_iter[5] >> 6) & 0b11;
+      const uint8_t version_number        = (pkt_iter[5] >> 1) & 0b11111;
+      const uint8_t current_next_indc     = pkt_iter[5] & 0b1;
+      const uint8_t section_number        = pkt_iter[6];
+      const uint8_t last_section_number   = pkt_iter[7];
+      const uint8_t reserved2             = (pkt_iter[8] >> 5) & 0b111;
+      const Pid_t pcr_pid                 = ((pkt_iter[8] & 0b11111) << 8) | pkt_iter[9];
+      const uint8_t reserved3             = (pkt_iter[10] >> 4) & 0b1111;
+      const uint8_t prog_info_len_zero    = (pkt_iter[10] >> 2) & 0b11;
+      const uint16_t prog_info_len        = ((pkt_iter[10] & 0b11) << 8) | pkt_iter[11];
+      if (table_id != 2u ||
+          !section_syntax_flag ||
+          zero ||
+          reserved0 != 0b11 ||
+          section_len_zero ||
+          (section_len < 9 + 4 || section_len > 0x3FD) ||
+          program_number != 1u ||
+          reserved1 != 0b11 ||
+          version_number ||
+          !current_next_indc ||
+          section_number ||
+          last_section_number ||
+          reserved2 != 0b111 ||
+          pcr_pid != expected_pcr_pid ||
+          reserved3 != 0b1111 ||
+          prog_info_len_zero ||
+          prog_info_len) {
+        LOG(ERROR) << "invalid PMT header";
+        return false;
+      }
+      pkt_iter.remove_prefix(12);
+
+      uint16_t table_data_len = section_len - 9 - 4;
+      if (table_data_len + 4u > pkt_iter.size()) {
+        LOG(ERROR) << "invalid PMT size";
+        return false;
+      }
+      auto table_data = pkt_iter.substr(0, table_data_len);
+      pkt_iter.remove_prefix(table_data_len);
+      pkt_iter.remove_prefix(4); // CRC32 not verified
+
+      while (!table_data.empty())
+      {
+        // Parse each stream data block (ISO 13818-1 Table 2-33)
         if (table_data.size() < 5) {
-          LOG(ERROR) << "invalid PMT table stream data";
+          LOG(ERROR) << "invalid PMT stream data";
           return false;
         }
-        const uint8_t stream_type       = table_data[0];
-        const uint8_t reserved4         = (table_data[1] >> 5) & 0b111;
-        const Pid_t stream_pid          = ((table_data[1] & 0b11111) << 8) | table_data[2];
-        const uint8_t reserved5         = (table_data[3] >> 2) & 0b111111;
-        const uint16_t stream_info_len  = ((table_data[3] & 0b11) << 8) | table_data[4];
+        const uint8_t stream_type           = table_data[0];
+        const uint8_t reserved4             = (table_data[1] >> 5) & 0b111;
+        const Pid_t stream_pid              = ((table_data[1] & 0b11111) << 8) | table_data[2];
+        const uint8_t reserved5             = (table_data[3] >> 4) & 0b1111;
+        const uint8_t stream_info_len_zero  = (table_data[3] >> 2) & 0b11;
+        const uint16_t stream_info_len      = ((table_data[3] & 0b11) << 8) | table_data[4];
         if (reserved4 != 0b111 ||
-            reserved5 != 0b111100 ||
+            reserved5 != 0b1111 ||
+            stream_info_len_zero ||
             stream_info_len + 5u > table_data.size()) {
-          LOG(ERROR) << "invalid PMT table stream fields";
+          LOG(ERROR) << "invalid PMT stream fields";
           return false;
         }
-        m::byte_view stream_info(table_data.data() + 5, stream_info_len);
-        table_data.remove_prefix(5 + stream_info_len);
+        table_data.remove_prefix(5);
 
+        // Find the stream with the given PID and set the type
         auto i_stream = streams.find(stream_pid);
         if (i_stream == streams.end()) {
           LOG(ERROR) << "unknown stream in PMT pid=" << int(stream_pid);
@@ -298,11 +402,11 @@ namespace mpegts
         }
         stream.Type = stream_type;
 
-        static constexpr uint8_t DESC_TAG_LANG = 10;
-        static constexpr uint8_t DESC_TAG_PRIV_FMT = 5;
-
-        // Read stream_info descriptors
-        while (!stream_info.empty()) {
+        // Parse stream_info descriptors
+        auto stream_info = table_data.substr(0, stream_info_len);
+        table_data.remove_prefix(stream_info_len);
+        while (!stream_info.empty())
+        {
           if (stream_info.size() < 2) {
             LOG(ERROR) << "invalid PMT stream info descriptor";
             return false;
@@ -310,25 +414,27 @@ namespace mpegts
           const uint8_t desc_tag = stream_info[0];
           const uint8_t desc_len = stream_info[1];
           stream_info.remove_prefix(2);
-
           if (desc_len > stream_info.size()) {
             LOG(ERROR) << "invalid PMT stream info descriptor";
             return false;
           }
 
+          static constexpr uint8_t DESC_TAG_LANG      = 0x0A; // ISO639 Language
+          static constexpr uint8_t DESC_TAG_PRIV_FMT  = 0x05; // Private format registration
+
           if (desc_tag == DESC_TAG_LANG) {
-            if (stream_info[desc_len-1] != 0x00 && stream_info[desc_len-1] != 0x03) {
+            if (stream_info[desc_len-1] != 0x00) {
               LOG(ERROR) << "invalid PMT stream info lang descriptor";
               return false;
             }
-            std::string_view lang((const char*) stream_info.data(), desc_len - 1);
+            auto lang = m::view<char>(stream_info.substr(0, desc_len - 1));
             if (!stream.Lang.empty() && stream.Lang != lang) {
               LOG(ERROR) << "conflicting stream info lang descriptor pid=" << int(stream_pid);
               return false;
             }
             stream.Lang = lang;
           } else if (desc_tag == DESC_TAG_PRIV_FMT) {
-            //TODO
+            // NB: These are ignored
           } else {
             LOG(ERROR) << "unhandled stream descriptor tag=" << int(desc_tag);
             return false;
@@ -336,32 +442,38 @@ namespace mpegts
           stream_info.remove_prefix(desc_len);
         }
       }
+
+      // Verify the remainder of the packet is properly stuffed
+      for (auto stuffing_byte : pkt_iter) {
+        if (stuffing_byte != 0xFF) {
+          LOG(ERROR) << "invalid PMT stuffing bytes";
+          return false;
+        }
+      }
     }
     return true;
   }
 
-  inline bool depacketize_stream(const PacketizedStream& stream, ElementaryStream& out)
+  static inline bool depacketize_stream(const PacketizedElementaryStream& pes, ElementaryStream& out)
   {
-    for (const auto& pkt : stream.Packets) {
+    for (const auto& pkt : pes.Packets)
+    {
       auto pkt_iter = pkt.Data.get_read_view();
+
+      // Parse PES packet header (ISO 13818-1 Table 2-21)
       if (pkt_iter.size() < 9) {
         LOG(ERROR) << "invalid pes header";
         return false;
       }
-      const uint32_t start_code =
-        (pkt_iter[0] << 16) |
-        (pkt_iter[1] <<  8) |
-        (pkt_iter[2] <<  0);
-      const uint8_t stream_id = pkt_iter[3];
-      const uint16_t pkt_len =
-        (pkt_iter[4] <<  8) |
-        (pkt_iter[5] <<  0);
-      const uint8_t marker              = (pkt_iter[6] >> 6) & 0b11;
+      const uint32_t start_code_prefix  = (pkt_iter[0] << 16) | (pkt_iter[1] << 8) | pkt_iter[2];
+      const uint8_t stream_id           = pkt_iter[3];
+      const uint16_t pes_pkt_len        = (pkt_iter[4] << 8) | pkt_iter[5];
+      const uint8_t one_zero            = (pkt_iter[6] >> 6) & 0b11;
       const uint8_t scrambling_control  = (pkt_iter[6] >> 4) & 0b11;
       const bool priority               = pkt_iter[6] & 0x08;
       const bool alignment_ind          = pkt_iter[6] & 0x04;
       const bool copyright              = pkt_iter[6] & 0x02;
-      const bool original_copy          = pkt_iter[6] & 0x01;
+      const bool original_or_copy       = pkt_iter[6] & 0x01;
       const uint8_t pts_dts             = (pkt_iter[7] >> 6) & 0b11;
       const bool escr_flag              = pkt_iter[7] & 0x20;
       const bool es_rate                = pkt_iter[7] & 0x10;
@@ -370,15 +482,15 @@ namespace mpegts
       const bool crc_flag               = pkt_iter[7] & 0x02;
       const bool ext_flag               = pkt_iter[7] & 0x01;
       const uint8_t pes_hdr_len         = pkt_iter[8];
-      if (start_code != 0x000001 ||
-          stream_id != 0xE0 ||
-          pkt_len != 0 ||
-          marker != 0b10 ||
-          scrambling_control != 0b00 ||
+      if (start_code_prefix != 0x000001 ||
+          stream_id != 0xE0 || // (ISO 13818-1 Table 2-22)
+          pes_pkt_len || // 0 means not specified
+          one_zero != 0b10 ||
+          scrambling_control ||
           priority ||
           alignment_ind ||
           copyright ||
-          original_copy ||
+          original_or_copy ||
           (pts_dts != 0b11 && pts_dts != 0b10) ||
           escr_flag ||
           es_rate ||
@@ -393,13 +505,28 @@ namespace mpegts
         return false;
       }
       pkt_iter.remove_prefix(9u);
+
+      // Parse PTS value (always present)
       const uint64_t PTS = 300ul *
         ((((pkt_iter[0] >> 1) & 0b111) << 30) |
          (pkt_iter[1] << 22) |
          ((((pkt_iter[2] >> 1) & 0b1111111) << 15)) |
          (pkt_iter[3] << 7) |
          ((((pkt_iter[4] >> 1) & 0b1111111))));
+      const uint8_t mark0 = (pkt_iter[0] >> 4) & 0b1111;
+      const uint8_t mark1 = pkt_iter[0] & 0x01;
+      const uint8_t mark2 = pkt_iter[2] & 0x01;
+      const uint8_t mark3 = pkt_iter[4] & 0x01;
+      if (mark0 != pts_dts ||
+          !mark1 ||
+          !mark2 ||
+          !mark3) {
+        LOG(ERROR) << "invalid pes PTS";
+        return false;
+      }
       pkt_iter.remove_prefix(5);
+
+      // Parse DTS value if present
       uint64_t DTS = PTS;
       if (pts_dts == 0b11) {
         DTS = 300ul *
@@ -408,81 +535,24 @@ namespace mpegts
            ((((pkt_iter[2] >> 1) & 0b1111111) << 15)) |
            (pkt_iter[3] << 7) |
            ((((pkt_iter[4] >> 1) & 0b1111111))));
+        const uint8_t dmark0 = (pkt_iter[0] >> 4) & 0b1111;
+        const uint8_t dmark1 = pkt_iter[0] & 0x01;
+        const uint8_t dmark2 = pkt_iter[2] & 0x01;
+        const uint8_t dmark3 = pkt_iter[4] & 0x01;
+        if (dmark0 != 0b0001 ||
+            !dmark1 ||
+            !dmark2 ||
+            !dmark3) {
+          LOG(ERROR) << "invalid pes DTS";
+          return false;
+        }
         pkt_iter.remove_prefix(5);
       }
+
+      //TODO: Interpolate PCR via MPEGTS packets correctly
       out.Times[out.Data.get_read_left()] = { pkt.PCR, PTS, DTS };
       out.Data.write(pkt_iter.data(), pkt_iter.size());
     }
-    return true;
-  }
-
-  inline bool _detail::_parse_table(m::byte_view pkt_iter, uint8_t expected_table_id, m::byte_view& table_data)
-  {
-    if (pkt_iter.empty()) {
-      LOG(ERROR) << "invalid table";
-      return false;
-    }
-
-    const uint8_t pointer_bytes = pkt_iter[0];
-    if (pointer_bytes != 0) {
-      LOG(ERROR) << "unhandled table pointer bytes num=" << int(pointer_bytes);
-      return false;
-    }
-    pkt_iter.remove_prefix(1);
-
-    if (pkt_iter.size() < 3) {
-      LOG(ERROR) << "invalid table";
-      return false;
-    }
-    const uint8_t table_id          = pkt_iter[0];
-    const bool section_syntax_flag  = pkt_iter[1] & 0x80;
-    //const bool private_flag         = pkt_iter[1] & 0x40;
-    const uint8_t reserved0         = (pkt_iter[1] >> 2) & 0b1111;
-    const uint16_t section_len      = ((pkt_iter[1] & 0b11) << 8) | pkt_iter[2];
-    if (table_id != expected_table_id ||
-        ! section_syntax_flag ||
-        reserved0 != 0b1100 ||
-        section_len > 1021 ||
-        section_len < 9 ||
-        section_len > pkt_iter.size()) {
-      LOG(ERROR) << "invalid table fields";
-      return false;
-    }
-    pkt_iter.remove_prefix(3);
-
-    const uint16_t data_len         = section_len - 9;
-    const uint16_t table_id_ext     = (pkt_iter[0] << 8) | pkt_iter[1];
-    const uint8_t reserved1         = (pkt_iter[2] >> 6) & 0b11;
-    const uint8_t version           = (pkt_iter[2] >> 1) & 0b11111;
-    const bool current_next         = pkt_iter[2] & 0b1;
-    const uint8_t section_num       = pkt_iter[3];
-    const uint8_t last_section_num  = pkt_iter[4];
-    table_data                      = m::byte_view(pkt_iter.data() + 5, data_len);
-    /* const uint32_t crc =
-      (pkt_iter[5 + data_len + 0] << 24) |
-      (pkt_iter[5 + data_len + 1] << 16) |
-      (pkt_iter[5 + data_len + 2] << 8)  |
-      (pkt_iter[5 + data_len + 3] << 0); */
-    if (table_id_ext != 1 ||
-        reserved1 != 0b11 ||
-        version != 0 ||
-        ! current_next ||
-        section_num != 0 ||
-        last_section_num != 0) {
-      LOG(ERROR) << "invalid section fields";
-      return false;
-    }
-    pkt_iter.remove_prefix(section_len);
-
-    // All remaining bytes should be stuffed
-    while (!pkt_iter.empty()) {
-      if (pkt_iter[0] != 0xFF) {
-        LOG(ERROR) << "invalid table stuffing";
-        return false;
-      }
-      pkt_iter.remove_prefix(1);
-    }
-
     return true;
   }
 

@@ -1,7 +1,7 @@
 #TODO: Separate debug/release mode w/ other than -O0
 
 CXX       := g++
-CXXFLAGS  := -std=c++17 -g -ggdb -Wall -Werror -Wextra -Wconversion -Wpedantic -pedantic-errors -O0
+CXXFLAGS  := -std=c++17 -ggdb -Wall -Werror -Wextra -Wconversion -Wpedantic -pedantic-errors -O0
 DEPFLAGS   = -MT $@ -MMD -MP -MF $*.d
 INCLUDE   := -Ivendor/m/include
 BINS      := atsc-cc-extractor
