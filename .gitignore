@@ -1,4 +1,6 @@
 atsc-cc-extractor
+atsc-cc-extractor_dbg
+atsc-cc-extractor_san
 *.o
 *.d
 
