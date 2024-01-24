@@ -423,7 +423,8 @@ namespace mpegts
           static constexpr uint8_t DESC_TAG_PRIV_FMT  = 0x05; // Private format registration
 
           if (desc_tag == DESC_TAG_LANG) {
-            if (stream_info[desc_len-1] != 0x00) {
+            if (stream_info[desc_len-1] != 0x00 && // Undefined
+                stream_info[desc_len-1] != 0x03) { // Visual impaired commentary
               LOG(ERROR) << "invalid PMT stream info lang descriptor";
               return false;
             }

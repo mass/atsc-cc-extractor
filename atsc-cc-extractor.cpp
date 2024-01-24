@@ -1,8 +1,12 @@
 ////////////////////////////////////////////////////////////////////////////////
 /// atsc-cc-extractor
 ///
-/// Program that outputs embedded CEA-708 closed captions in SRT format from
+/// Program that outputs embedded CTA-708 closed captions in SRT format from
 /// over-the-air ATSC 1.0 TV recordings captured in MPEG-TS format.
+///
+/// Notes
+/// - CTA-708 is formerly known as CEA-708 and EIA-708
+/// - EIA-608 is an older standard, sometimes called CEA-608
 ///
 /// References
 /// - http://www.bretl.com/mpeghtml/vidstruc.HTM
@@ -10,9 +14,13 @@
 /// - http://eilat.sci.brooklyn.cuny.edu/cis52/userfiles/file/MPEG.pdf
 /// - http://www.cs.columbia.edu/~delbert/docs/Dueck%20--%20MPEG-2%20Video%20Transcoding.pdf
 /// - https://comcast.github.io/caption-inspector/html/docs-page.html
-/// - https://en.wikipedia.org/wiki/CEA-708
-/// - ISO/IEC 13818-1
+/// - https://en.wikipedia.org/wiki/CTA-708
+/// - ISO/IEC 13818-1 (mpegts)
+/// - ISO/IEC 13818-2 (mpegv)
+/// - ATSC A/53 Part 4 (mpegv)
+/// - ANSI/CEA-708-E (dtvcc)
 
+#include "dtvcc.hpp"
 #include "mpegts.hpp"
 #include "mpegv.hpp"
 #include "utils.hpp"
@@ -103,16 +111,17 @@ int main(int argc, char** argv)
   streams.clear();
   LOG(INFO) << "depacketized mpeg2 video stream bytes=" << mpeg2v_stream.Data.get_read_left();
 
-  // Extract DTVCC transport stream (CEA-708 closed captions) from MPEG2 video stream
-  std::vector<mpegv::DtvccPacket> dtvcc_packets;
+  // Extract DTVCC transport stream (CTA-708 closed captions) from MPEG2 video stream
+  std::vector<dtvcc::Packet> dtvcc_packets;
   if (not mpegv::extract_dtvcc_packets(mpeg2v_stream, dtvcc_packets))
     return 1;
   mpeg2v_stream.Data.free();
+  mpeg2v_stream.Times.clear();
   LOG(INFO) << "extracted dtvcc transport stream num_packets=" << dtvcc_packets.size();
 
   // Extract each DTVCC "service" as a contiguous stream
   std::map<uint8_t, mpegts::ElementaryStream> dtvcc_services;
-  if (not mpegv::depacketize_dtvcc_stream(dtvcc_packets, dtvcc_services))
+  if (not dtvcc::depacketize_dtvcc_stream(dtvcc_packets, dtvcc_services))
     return 1;
   dtvcc_packets.clear();
   dtvcc_packets.shrink_to_fit();
@@ -130,7 +139,7 @@ int main(int argc, char** argv)
   dtvcc_services.clear();
 
   // TODO
-  if (not mpegv::process_dtvcc_stream(dtvcc_stream))
+  if (not dtvcc::process_dtvcc_stream(dtvcc_stream))
     return 1;
 
   //TODO: Further steps
