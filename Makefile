@@ -4,7 +4,7 @@ CXXFLAGS_REL  := -O3
 CXXFLAGS_DBG  := -ggdb -O0
 CXXFLAGS_SAN  := -fsanitize=address -fsanitize=leak
 DEPFLAGS       = -MT $@ -MMD -MP -MF $*
-INCLUDE       := -Ivendor/m/include
+INCLUDE       := -Ivendor/u/include
 BINS          := atsc-cc-extractor
 DEPFILES      := $(BINS:%=%.rel.d) $(BINS:%=%.dbg.d) $(BINS:%=%.san.d)
 

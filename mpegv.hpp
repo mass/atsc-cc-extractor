@@ -45,9 +45,9 @@ namespace mpegv
     static constexpr uint8_t _START_CODE_SLL = 0x01;
     static constexpr uint8_t _START_CODE_SLH = 0xAF;
 
-    static inline std::optional<uint8_t> _next_start_code(m::byte_view& iter, bool consume);
-    static inline void _skipto_start_code(m::byte_view& iter);
-    static inline void _skipto_seq_gop(m::byte_view& iter, bool gop);
+    static inline std::optional<uint8_t> _next_start_code(u::byte_view& iter, bool consume);
+    static inline void _skipto_start_code(u::byte_view& iter);
+    static inline void _skipto_seq_gop(u::byte_view& iter, bool gop);
 
     static inline bool _parse_sequence(mpegts::ElementaryStream& mpeg2v_stream, std::vector<dtvcc::Packet>& out);
     static inline bool _parse_gop(mpegts::ElementaryStream& mpeg2v_stream, std::vector<dtvcc::Packet>& out);
@@ -84,7 +84,7 @@ namespace mpegv
   // bytes. Any other byte value encountered is an error. Either leaves the
   // iterator positioned at the start code or just past it.
   // NB: Start codes are always byte aligned
-  static inline std::optional<uint8_t> _detail::_next_start_code(m::byte_view& iter, bool consume)
+  static inline std::optional<uint8_t> _detail::_next_start_code(u::byte_view& iter, bool consume)
   {
     while (iter.size() >= 4) {
       const uint32_t prefix = (iter[0] << 16) | (iter[1] << 8) | (iter[2]);
@@ -106,7 +106,7 @@ namespace mpegv
   // Position the iterator at the next start code (but do not consume it). Is
   // allowed to skip over bytes with any value. This is used to skip past
   // structures we aren't currently parsing, and is not an error.
-  static inline void _detail::_skipto_start_code(m::byte_view& iter)
+  static inline void _detail::_skipto_start_code(u::byte_view& iter)
   {
     while (iter.size() >= 4) {
       const uint32_t prefix = (iter[0] << 16) | (iter[1] << 8) | (iter[2]);
@@ -123,7 +123,7 @@ namespace mpegv
   // ahead to the next position we can start processing from. Logs details
   // about how large the skipped region was.
   //TODO: Better logging around the time that was skipped, etc.
-  static inline void _detail::_skipto_seq_gop(m::byte_view& iter, bool gop)
+  static inline void _detail::_skipto_seq_gop(u::byte_view& iter, bool gop)
   {
     auto orig_size = iter.size();
     while (iter.size() >= 4) {

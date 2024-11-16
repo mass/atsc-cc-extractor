@@ -1,7 +1,7 @@
 #pragma once
 
-#include <m/m.hpp>
-#include <m/log.hpp>
+#include <u/u.hpp>
+#include <u/log.hpp>
 
 #include <cstdio>
 #include <cstring>
@@ -12,11 +12,11 @@
 namespace utils
 {
   // Read the entire contents of the given binary file into a byte vector
-  static inline bool read_file(std::string_view filename, m::byte_vec& out);
+  static inline bool read_file(std::string_view filename, u::byte_vec& out);
 
   /// Implementation ///////////////////////////////////////////////////////////
 
-  static inline bool read_file(std::string_view filename, m::byte_vec& out)
+  static inline bool read_file(std::string_view filename, u::byte_vec& out)
   {
     FILE* fp = nullptr;
     if ((fp = ::fopen(filename.data(), "r")) == nullptr) {

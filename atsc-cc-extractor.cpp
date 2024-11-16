@@ -25,8 +25,8 @@
 #include "mpegv.hpp"
 #include "utils.hpp"
 
-#include <m/m.hpp>
-#include <m/log.hpp>
+#include <u/u.hpp>
+#include <u/log.hpp>
 
 int main(int argc, char** argv)
 {
@@ -39,7 +39,7 @@ int main(int argc, char** argv)
   LOG(INFO) << "reading filename=(" << input_fname << ")";
 
   // Read input file data into memory
-  m::byte_vec input_data;
+  u::byte_vec input_data;
   if (not utils::read_file(input_fname, input_data))
     return 1;
   LOG(INFO) << "read input file into memory bytes=" << input_data.size();
@@ -47,7 +47,7 @@ int main(int argc, char** argv)
   // Scan through input data and parse as transport stream format
   mpegts::Pid_t pcr_pid;
   mpegts::StreamMap_t streams;
-  if (not mpegts::demux(m::view(input_data), streams, pcr_pid))
+  if (not mpegts::demux(u::view(input_data), streams, pcr_pid))
     return 1;
   input_data.clear();
   input_data.shrink_to_fit();

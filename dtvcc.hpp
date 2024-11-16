@@ -17,7 +17,7 @@ namespace dtvcc
   static_assert(sizeof(Packet) == 64);
 
   // TODO
-  static inline bool parse_dtvcc_user_data(m::byte_view& iter, std::vector<Packet>& out);
+  static inline bool parse_dtvcc_user_data(u::byte_view& iter, std::vector<Packet>& out);
 
   // Extract contiguous "services" of DTVCC data from the packetized transport stream
   static inline bool depacketize_dtvcc_stream(
@@ -29,7 +29,7 @@ namespace dtvcc
 
   /// Implementation ///////////////////////////////////////////////////////////
 
-  static inline bool parse_dtvcc_user_data(m::byte_view& iter, std::vector<Packet>& out)
+  static inline bool parse_dtvcc_user_data(u::byte_view& iter, std::vector<Packet>& out)
   {
     // user_data header
     uint8_t cc_count = 0;
@@ -121,7 +121,7 @@ namespace dtvcc
       for (auto& [_, svc] : out)
         svc.Times[svc.Data.get_read_left()] = pkt.Times;
 
-      auto pkt_iter = m::byte_view{pkt.Data, pkt.Num};
+      auto pkt_iter = u::byte_view{pkt.Data, pkt.Num};
       if (pkt_iter.size() < 1) {
         LOG(ERROR) << "invalid dtvcc packet";
         return false;

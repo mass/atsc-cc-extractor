@@ -1,7 +1,7 @@
 #pragma once
 
-#include <m/log.hpp>
-#include <m/stream_buf.hpp>
+#include <u/log.hpp>
+#include <u/stream_buf.hpp>
 
 #include <map>
 #include <unordered_map>
@@ -33,7 +33,7 @@ namespace mpegts
     struct Packet
     {
       uint64_t PCR;
-      m::stream_buf<> Data;
+      u::stream_buf<> Data;
     };
     std::vector<Packet> Packets;
 
@@ -46,14 +46,14 @@ namespace mpegts
   // Elementary Stream - entire stream in one contiguous region of memory
   struct ElementaryStream
   {
-    m::stream_buf<> Data;
+    u::stream_buf<> Data;
     std::map<off_t, Timecodes> Times;
 
-    m::byte_view Iter;
+    u::byte_view Iter;
   };
 
   // Demultiplex bytes in MPEG-TS container format into a PES map
-  static inline bool demux(m::byte_view input, StreamMap_t& out, Pid_t& pcr_pid);
+  static inline bool demux(u::byte_view input, StreamMap_t& out, Pid_t& pcr_pid);
 
   // Decode the Program Association Table to locate the PMT PID
   static inline bool parse_pat(const PacketizedElementaryStream& pat, Pid_t& pmt_pid);
@@ -66,7 +66,7 @@ namespace mpegts
 
   /// Implementation ///////////////////////////////////////////////////////////
 
-  static inline bool demux(m::byte_view input, StreamMap_t& out, Pid_t& pcr_pid)
+  static inline bool demux(u::byte_view input, StreamMap_t& out, Pid_t& pcr_pid)
   {
     // An MPEG TS is nothing but a sequence of fixed-size packets
     static constexpr size_t TS_PKT_SIZE = 188;
@@ -200,7 +200,7 @@ namespace mpegts
 
       // Save packet payload
       if (payload_start)
-        pes.Packets.emplace_back(PacketizedElementaryStream::Packet{PCR, m::stream_buf{}});
+        pes.Packets.emplace_back(PacketizedElementaryStream::Packet{PCR, u::stream_buf{}});
       else if (pes.Packets.empty()) {
         LOG(ERROR) << "payload not started with no previous packet stream=" << pid;
         return false;
@@ -428,7 +428,7 @@ namespace mpegts
               LOG(ERROR) << "invalid PMT stream info lang descriptor";
               return false;
             }
-            auto lang = m::view<char>(stream_info.substr(0, desc_len - 1));
+            auto lang = u::view<char>(stream_info.substr(0, desc_len - 1));
             if (!stream.Lang.empty() && stream.Lang != lang) {
               LOG(ERROR) << "conflicting stream info lang descriptor pid=" << int(stream_pid);
               return false;
